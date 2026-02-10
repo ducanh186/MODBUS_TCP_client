@@ -1,6 +1,3 @@
-"""
-Client helper: build request + parse response tối thiểu.
-"""
 
 from __future__ import annotations
 
@@ -8,11 +5,11 @@ import struct
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Union
 
-
+# Hex dump utility for debugging
 def hexdump(b: bytes) -> str:
     return b.hex(" ")
 
-
+# Extract a complete Modbus TCP frame from a stream buffer
 def frame_from_stream_buffer(buf: bytes) -> Tuple[Optional[bytes], bytes]:
     if len(buf) < 6:
         return None, buf
