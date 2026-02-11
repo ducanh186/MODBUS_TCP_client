@@ -11,6 +11,8 @@ def main():
     ap.add_argument("--count", type=int, default=2, help="Number of registers to read")
     ap.add_argument("--area", choices=["hr", "ir"], default="ir", help="Register area: hr (holding) or ir (input)")
     ap.add_argument("--set-kw", type=float, default=None, help="FC06 write power (kW) to HR at --addr")
+    ap.add_argument("--decode", choices=["power", "soc", "capacity", "raw"], default="power",
+                    help="Decoder: power (kW signed), soc (%% unsigned), capacity (kWh sc=0.1), raw")
     args = ap.parse_args()
 
     client = ModbusTcpClient(args.host, port=args.port)
@@ -38,8 +40,15 @@ def main():
         print(f"Read {area_label} (device_id={args.device_id}, addr={args.addr}, count={args.count}):")
         for i, reg_u16 in enumerate(rr.registers):
             addr = args.addr + i
-            value_kw = DeviceModel.decode_power_kw(reg_u16)
-            print(f"  {area_label}{addr} = {value_kw:.1f} (raw={reg_u16})")
+            if args.decode == "power":
+                val_str = f"{DeviceModel.decode_power_kw(reg_u16):.1f} kW"
+            elif args.decode == "soc":
+                val_str = f"{DeviceModel.decode_soc(reg_u16):.0f} %"
+            elif args.decode == "capacity":
+                val_str = f"{DeviceModel.decode_capacity_kwh(reg_u16):.1f} kWh"
+            else:
+                val_str = str(reg_u16)
+            print(f"  {area_label}{addr} = {val_str} (raw={reg_u16})")
 
     finally:
         client.close()
