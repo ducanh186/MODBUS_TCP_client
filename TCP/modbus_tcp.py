@@ -19,24 +19,25 @@ def frame_from_stream_buffer(buf: bytes) -> Tuple[Optional[bytes], bytes]:
         return None, buf
     return buf[:total], buf[total:]
 
-
+# Build MBAP header and PDU
 def build_mbap(transaction_id: int, unit_id: int, pdu: bytes) -> bytes:
     length = 1 + len(pdu)
     return struct.pack(">HHH", transaction_id, 0, length) + bytes([unit_id]) + pdu
 
-
+# Build FC 03 and FC 06 requests
+# FC 03: Read Holding Registers
 def build_fc03_request(transaction_id: int, unit_id: int, address: int, count: int) -> bytes:
     pdu = bytes([3]) + struct.pack(">H", address) + struct.pack(">H", count)
     return build_mbap(transaction_id, unit_id, pdu)
 
-
+# FC 06: Write Single Register
 def build_fc06_request(transaction_id: int, unit_id: int, address: int, value: int) -> bytes:
     pdu = bytes([6]) + struct.pack(">H", address) + struct.pack(">H", value & 0xFFFF)
     return build_mbap(transaction_id, unit_id, pdu)
 
 
 @dataclass(frozen=True)
-class ModbusResponse:
+class ModbusResponse: # Parsed Modbus TCP response
     transaction_id: int
     unit_id: int
     function_code: int

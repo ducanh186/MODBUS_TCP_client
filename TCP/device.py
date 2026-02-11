@@ -1,4 +1,10 @@
-
+"""
+Define a device model have:
+    HR addresses for power measurement
+    Convention that 0.1 kW per LSB
+    encode: float kW -> int16 register value -> u16 register value
+    decode: u16 register value -> int16 register value -> float kW
+"""
 class DeviceModel:
     HR0_ADDRESS = 0
     HR1_ADDRESS = 1
