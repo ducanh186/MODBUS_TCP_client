@@ -8,29 +8,32 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=15020)
     ap.add_argument("--device-id", type=int, default=1)
-    ap.add_argument("--set-kw", type=float, required=True, help="Write demand_control_power (kW) to HR0")
+    ap.add_argument("--addr", type=int, default=0, help="Register address (0-based)")
+    ap.add_argument("--count", type=int, default=2, help="Number of registers to read")
+    ap.add_argument("--set-kw", type=float, default=None, help="Write power (kW) to register at --addr")
     args = ap.parse_args()
-    # Connect to Modbus TCP server
+
     client = ModbusTcpClient(args.host, port=args.port)
     if not client.connect():
         raise RuntimeError("Cannot connect to server")
 
     try:
-        # FC06: write single Holding Register (HR0)
-        value_u16 = DeviceModel.encode_power_kw(args.set_kw)
-        wr = client.write_register(DeviceModel.HR0_ADDRESS, value_u16, device_id=args.device_id)
-        if wr.isError():
-            raise RuntimeError(f"Write failed: {wr}")
+        if args.set_kw is not None:
+            value_u16 = DeviceModel.encode_power_kw(args.set_kw)
+            wr = client.write_register(args.addr, value_u16, device_id=args.device_id)
+            if wr.isError():
+                raise RuntimeError(f"Write failed: {wr}")
+            print(f"Wrote HR{args.addr} = {args.set_kw:.1f} kW (device_id={args.device_id})")
 
-        # FC03: read Holding Registers (HR0..HR1)
-        rr = client.read_holding_registers(DeviceModel.HR0_ADDRESS, count=2, device_id=args.device_id)
+        rr = client.read_holding_registers(args.addr, count=args.count, device_id=args.device_id)
         if rr.isError():
             raise RuntimeError(f"Read failed: {rr}")
-        # Decode readback values and print
-        hr0_u16, hr1_u16 = rr.registers[0], rr.registers[1]
-        print("Readback:")
-        print(f"  HR0 demand_control_power = {DeviceModel.decode_power_kw(hr0_u16)} kW")
-        print(f"  HR1 active_power         = {DeviceModel.decode_power_kw(hr1_u16)} kW (Phase 1 => expect 0)")
+
+        print(f"Read (device_id={args.device_id}, addr={args.addr}, count={args.count}):")
+        for i, reg_u16 in enumerate(rr.registers):
+            addr = args.addr + i
+            value_kw = DeviceModel.decode_power_kw(reg_u16)
+            print(f"  HR{addr} = {value_kw:.1f} kW")
 
     finally:
         client.close() # Close connection
