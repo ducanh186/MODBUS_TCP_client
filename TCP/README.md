@@ -1,1 +1,0 @@
-CLI (console) đọc tất cả device + nhập lệnh và ghi vào PMS
