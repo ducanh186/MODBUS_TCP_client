@@ -234,7 +234,8 @@
       const pms = d.pms;
 
       // Connection card
-      const allComms = [d.pms, d.pcs1, d.pcs2, d.bms1, d.bms2].map(x => x && x.comm);
+      // External dashboard: PMS only (PCS/BMS are on separate ports, internal only)
+      const allComms = [d.pms].map(x => x && x.comm);
       const allOk = allComms.every(c => c && c.ok);
       const anyDown = allComms.some(c => !c || !c.ok);
       const cfg = snap.config || {};
@@ -282,21 +283,17 @@
       updateSendBtnState();
 
       // ---- Device table ----
+      // PMS row only — PCS/BMS not accessible from external dashboard
       const rows = [
-        deviceRow("PMS",  d.pms,  { demand: true, power: "total_active_power_kw", powerRaw: "total_active_power_raw", powerMeta: "total_active_power_meta",
-                                     demandRaw: "demand_control_power_raw", demandMeta: "demand_control_power_meta",
-                                     soc: "soc_avg_pct", socRaw: "soc_avg_raw", socMeta: "soc_avg_meta",
-                                     soh: "soh_avg_pct", sohRaw: "soh_avg_raw", sohMeta: "soh_avg_meta",
-                                     cap: "capacity_total_kwh", capRaw: "capacity_total_raw", capMeta: "capacity_total_meta",
-                                     showDelta: true }),
-        deviceRow("PCS1", d.pcs1, { power: "active_power_kw", powerRaw: "active_power_raw", powerMeta: "active_power_meta" }),
-        deviceRow("PCS2", d.pcs2, { power: "active_power_kw", powerRaw: "active_power_raw", powerMeta: "active_power_meta" }),
-        deviceRow("BMS1", d.bms1, { soc: "soc_pct", socRaw: "soc_raw", socMeta: "soc_meta",
-                                     soh: "soh_pct", sohRaw: "soh_raw", sohMeta: "soh_meta",
-                                     cap: "capacity_kwh", capRaw: "capacity_raw", capMeta: "capacity_meta" }),
-        deviceRow("BMS2", d.bms2, { soc: "soc_pct", socRaw: "soc_raw", socMeta: "soc_meta",
-                                     soh: "soh_pct", sohRaw: "soh_raw", sohMeta: "soh_meta",
-                                     cap: "capacity_kwh", capRaw: "capacity_raw", capMeta: "capacity_meta" }),
+        deviceRow("PMS", d.pms, {
+          demand: true,
+          power: "total_active_power_kw", powerRaw: "total_active_power_raw", powerMeta: "total_active_power_meta",
+          demandRaw: "demand_control_power_raw", demandMeta: "demand_control_power_meta",
+          soc: "soc_avg_pct", socRaw: "soc_avg_raw", socMeta: "soc_avg_meta",
+          soh: "soh_avg_pct", sohRaw: "soh_avg_raw", sohMeta: "soh_avg_meta",
+          cap: "capacity_total_kwh", capRaw: "capacity_total_raw", capMeta: "capacity_total_meta",
+          showDelta: true,
+        }),
       ];
       document.getElementById("deviceTable").innerHTML = rows.join("");
     }
