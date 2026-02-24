@@ -133,6 +133,11 @@
       <div class="card-value" id="cardCmdVal">--</div>
       <div class="card-sub" id="cardCmdSub">No command sent yet</div>
     </div>
+    <div class="card" id="cardMM">
+      <div class="card-label">Multimeter (RTU)</div>
+      <div class="card-value" id="cardMMVal">-- kW</div>
+      <div class="card-sub" id="cardMMSub">Point of connection</div>
+    </div>
   </div>
 
   <!-- Device table -->
@@ -282,6 +287,19 @@
       currentDemandKw = pms ? pms.demand_control_power_kw : null;
       updateSendBtnState();
 
+      // Multimeter card
+      const mm = d.multimeter;
+      if (mm && mm.active_power_kw !== null) {
+        document.getElementById("cardMMVal").textContent = `${mm.active_power_kw} kW`;
+        const mmComm = getCommStatus(mm.comm);
+        document.getElementById("cardMMSub").textContent = `RTU slave=${mm.unit_id || 10} | ${mmComm.text}`;
+        document.getElementById("cardMM").className = mmComm.cls === "comm-ok" ? "card" : "card warn";
+      } else {
+        document.getElementById("cardMMVal").textContent = "-- kW";
+        document.getElementById("cardMMSub").textContent = mm ? "No data" : "Bridge not running";
+        document.getElementById("cardMM").className = "card warn";
+      }
+
       // ---- Device table ----
       // PMS row only — PCS/BMS not accessible from external dashboard
       const rows = [
@@ -294,6 +312,7 @@
           cap: "capacity_total_kwh", capRaw: "capacity_total_raw", capMeta: "capacity_total_meta",
           showDelta: true,
         }),
+        mmRow(d.multimeter),
       ];
       document.getElementById("deviceTable").innerHTML = rows.join("");
     }
@@ -326,6 +345,22 @@
         <td><b>${label}</b></td>
         <td>${dev.unit_id}</td>
         ${demand}${power}${delta}${soc}${soh}${cap}
+        <td class="${cs.cls}" title="${cs.tip}">${cs.text}</td>
+      </tr>`;
+    }
+
+    function mmRow(dev) {
+      if (!dev) return `<tr><td><b>Multimeter</b></td><td colspan="8" class="na">Bridge not running</td></tr>`;
+      const cs = getCommStatus(dev.comm);
+      return `<tr>
+        <td><b>Multimeter (RTU)</b></td>
+        <td>${dev.unit_id || 10}</td>
+        <td class="na">\u2014</td>
+        <td title="${tip(dev.active_power_raw, dev.active_power_meta)}">${fmtVal(dev.active_power_kw)}</td>
+        <td class="na">\u2014</td>
+        <td class="na">\u2014</td>
+        <td class="na">\u2014</td>
+        <td class="na">\u2014</td>
         <td class="${cs.cls}" title="${cs.tip}">${cs.text}</td>
       </tr>`;
     }
