@@ -1,28 +1,16 @@
-/**
- * poller.js — Polls PMS device only (external-client rule: PMS + Multimeter).
- *
- * Architecture: multi-port. PCS/BMS are on separate ports and must NOT be
- * accessed directly from the external dashboard.
- *
- * Maintains an in-memory snapshot with per-device comm status.
- * Anti-overlap guard: skips poll tick if previous cycle is still running.
- */
-
+const http = require("http");
 const ModbusClient = require("./modbus_client");
 
-// ---- Device definitions (external client: PMS only) ----
+const RTU_BRIDGE_URL = process.env.RTU_BRIDGE_URL || "http://localhost:8081/api/multimeter";
+
 const DEVICE_DEFS = {
   pms: { unit_id: 1, type: "PMS" },
-  // PCS1/PCS2/BMS1/BMS2 are on separate TCP ports — NOT accessible from
-  // external dashboard per system design (internal comms only).
 };
 
-// ---- Default comm status ----
 function defaultComm(msg = "not polled yet") {
   return { ok: false, last_ok_ts: null, last_error: msg };
 }
 
-// ---- Snapshot held in memory ----
 let snapshot = {
   ts: null,
   devices: {
@@ -39,6 +27,13 @@ let snapshot = {
       capacity_total_meta:       { reg: "IR3", scale: 0.1, unit: "kWh", fc: "FC04" },
       comm: defaultComm(),
     },
+    multimeter: {
+      unit_id: 10,
+      active_power_kw: null,
+      active_power_raw: null,
+      active_power_meta: { reg: "IR0", scale: 0.1, unit: "kW", fc: "FC04 (RTU)" },
+      comm: defaultComm("bridge not polled yet"),
+    },
   },
 };
 
@@ -52,25 +47,22 @@ function getSnapshot() {
 async function pollPMS(client) {
   const uid = DEVICE_DEFS.pms.unit_id;
   try {
-    const hr = await client.readHR(uid, 0, 1);   // FC03: HR0
-    const ir = await client.readIR(uid, 0, 4);   // FC04: IR0..IR3
+    const hr = await client.readHR(uid, 0, 1);
+    const ir = await client.readIR(uid, 0, 4);
     const now = new Date().toISOString();
 
     snapshot.devices.pms = {
       unit_id: uid,
-      // Decoded values
       demand_control_power_kw: parseFloat(ModbusClient.decodePowerKw(hr[0]).toFixed(1)),
       total_active_power_kw:   parseFloat(ModbusClient.decodePowerKw(ir[0]).toFixed(1)),
       soc_avg_pct:             ModbusClient.decodeScaled(ir[1], 1),
       soh_avg_pct:             ModbusClient.decodeScaled(ir[2], 1),
       capacity_total_kwh:      parseFloat(ModbusClient.decodeScaled(ir[3], 0.1).toFixed(1)),
-      // Raw uint16 values (for debug tooltips)
       demand_control_power_raw: hr[0],
       total_active_power_raw:   ir[0],
       soc_avg_raw:              ir[1],
       soh_avg_raw:              ir[2],
       capacity_total_raw:       ir[3],
-      // Meta (static, but included per snapshot for frontend simplicity)
       demand_control_power_meta: { reg: "HR0", scale: 0.1, unit: "kW", fc: "FC03" },
       total_active_power_meta:   { reg: "IR0", scale: 0.1, unit: "kW", fc: "FC04" },
       soc_avg_meta:              { reg: "IR1", scale: 1,   unit: "%",  fc: "FC04" },
@@ -85,22 +77,51 @@ async function pollPMS(client) {
   }
 }
 
-// ---- Main poll cycle (PMS only) ----
+function fetchJSON(url) {
+  return new Promise((resolve, reject) => {
+    http.get(url, (res) => {
+      let body = "";
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        try { resolve(JSON.parse(body)); }
+        catch (e) { reject(e); }
+      });
+    }).on("error", reject);
+  });
+}
+
+async function pollMultimeter() {
+  try {
+    const data = await fetchJSON(RTU_BRIDGE_URL);
+    snapshot.devices.multimeter = {
+      unit_id: 10,
+      active_power_kw: data.active_power_kw,
+      active_power_raw: data.raw,
+      active_power_meta: { reg: "IR0", scale: 0.1, unit: "kW", fc: "FC04 (RTU)" },
+      comm: data.comm || { ok: false, last_ok_ts: null, last_error: "no data from bridge" },
+    };
+  } catch (err) {
+    const prev = snapshot.devices.multimeter || {};
+    snapshot.devices.multimeter = {
+      ...prev,
+      comm: {
+        ok: false,
+        last_ok_ts: (prev.comm || {}).last_ok_ts || null,
+        last_error: `Bridge unreachable: ${err.message}`,
+      },
+    };
+  }
+}
 
 async function pollAll(client) {
   await pollPMS(client);
+  await pollMultimeter();
   snapshot.ts = new Date().toISOString();
 }
 
-/**
- * Start the polling loop with overlap guard.
- * @param {ModbusClient} client - connected ModbusClient instance
- * @param {number} intervalMs   - polling interval in ms (default 1000)
- * @returns {{ stop: Function }} - call stop() to halt polling
- */
 function startPolling(client, intervalMs = 1000) {
   let running = true;
-  let isPolling = false; // overlap guard
+  let isPolling = false;
 
   async function loop() {
     while (running) {
@@ -131,5 +152,3 @@ function startPolling(client, intervalMs = 1000) {
 }
 
 module.exports = { getSnapshot, startPolling, DEVICE_DEFS };
-// NOTE: PCS/BMS are on separate ports (15021-15025) and must never be polled
-// from the external dashboard. They are accessible only via internal controllers.
