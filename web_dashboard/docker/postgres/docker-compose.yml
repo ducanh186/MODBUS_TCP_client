@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: telemetry-postgres
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ}
+    ports:
+      - "5433:5432"
+    volumes:
+      - telemetry_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  telemetry_pgdata:
