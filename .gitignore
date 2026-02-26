@@ -2,6 +2,12 @@
 *.md
 !README.md
 
+# Docker postgres secrets
+web_dashboard/docker/postgres/.env
+
+# Web dashboard env (DB credentials)
+web_dashboard/.env
+
 # Node.js
 node_modules/
 package-lock.json
