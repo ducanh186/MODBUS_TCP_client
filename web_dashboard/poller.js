@@ -3,6 +3,16 @@ const ModbusClient = require("./modbus_client");
 
 const RTU_BRIDGE_URL = process.env.RTU_BRIDGE_URL || "http://localhost:8081/api/multimeter";
 
+// ---- Device port map (matches plant.yaml) ----
+const DEVICE_PORTS = {
+  pms:  { port: 15020, unit_id: 1, type: "PMS" },
+  pcs1: { port: 15021, unit_id: 1, type: "PCS" },
+  pcs2: { port: 15022, unit_id: 1, type: "PCS" },
+  bms1: { port: 15024, unit_id: 1, type: "BMS" },
+  bms2: { port: 15025, unit_id: 1, type: "BMS" },
+};
+
+// Export for use in server.js
 const DEVICE_DEFS = {
   pms: { unit_id: 1, type: "PMS" },
 };
@@ -27,6 +37,36 @@ let snapshot = {
       capacity_total_meta:       { reg: "IR3", scale: 0.1, unit: "kWh", fc: "FC04" },
       comm: defaultComm(),
     },
+    pcs1: {
+      unit_id: 1, port: 15021,
+      active_power_kw: null, active_power_raw: null,
+      active_power_meta: { reg: "IR0", scale: 0.1, unit: "kW", fc: "FC04" },
+      comm: defaultComm(),
+    },
+    pcs2: {
+      unit_id: 1, port: 15022,
+      active_power_kw: null, active_power_raw: null,
+      active_power_meta: { reg: "IR0", scale: 0.1, unit: "kW", fc: "FC04" },
+      comm: defaultComm(),
+    },
+    bms1: {
+      unit_id: 1, port: 15024,
+      soc_pct: null, soh_pct: null, capacity_kwh: null,
+      soc_raw: null, soh_raw: null, capacity_raw: null,
+      soc_meta:      { reg: "IR0", scale: 1,   unit: "%",   fc: "FC04" },
+      soh_meta:      { reg: "IR1", scale: 1,   unit: "%",   fc: "FC04" },
+      capacity_meta: { reg: "IR2", scale: 0.1, unit: "kWh", fc: "FC04" },
+      comm: defaultComm(),
+    },
+    bms2: {
+      unit_id: 1, port: 15025,
+      soc_pct: null, soh_pct: null, capacity_kwh: null,
+      soc_raw: null, soh_raw: null, capacity_raw: null,
+      soc_meta:      { reg: "IR0", scale: 1,   unit: "%",   fc: "FC04" },
+      soh_meta:      { reg: "IR1", scale: 1,   unit: "%",   fc: "FC04" },
+      capacity_meta: { reg: "IR2", scale: 0.1, unit: "kWh", fc: "FC04" },
+      comm: defaultComm(),
+    },
     multimeter: {
       unit_id: 10,
       active_power_kw: null,
@@ -37,16 +77,17 @@ let snapshot = {
   },
 };
 
-/** Return current snapshot. */
+/** Return current snapshot (deep copy to avoid mutation during async DB insert). */
 function getSnapshot() {
-  return snapshot;
+  return JSON.parse(JSON.stringify(snapshot));
 }
 
-// ---- Poll function: PMS only ----
+// ---- Poll helpers ----
 
 async function pollPMS(client) {
-  const uid = DEVICE_DEFS.pms.unit_id;
+  const uid = DEVICE_PORTS.pms.unit_id;
   try {
+    await client.ensureConnection();
     const hr = await client.readHR(uid, 0, 1);
     const ir = await client.readIR(uid, 0, 4);
     const now = new Date().toISOString();
@@ -74,6 +115,46 @@ async function pollPMS(client) {
     snapshot.devices.pms.comm.ok = false;
     snapshot.devices.pms.comm.last_error = err.message;
     console.error(`[poller] PMS poll error: ${err.message}`);
+  }
+}
+
+async function pollPCS(key, client) {
+  const uid = DEVICE_PORTS[key].unit_id;
+  const prev = snapshot.devices[key];
+  try {
+    await client.ensureConnection();
+    const ir = await client.readIR(uid, 0, 1);
+    const now = new Date().toISOString();
+    snapshot.devices[key] = {
+      ...prev,
+      active_power_kw: parseFloat(ModbusClient.decodePowerKw(ir[0]).toFixed(1)),
+      active_power_raw: ir[0],
+      comm: { ok: true, last_ok_ts: now, last_error: null },
+    };
+  } catch (err) {
+    snapshot.devices[key] = { ...prev, comm: { ok: false, last_ok_ts: (prev.comm || {}).last_ok_ts || null, last_error: err.message } };
+    console.error(`[poller] ${key.toUpperCase()} poll error: ${err.message}`);
+  }
+}
+
+async function pollBMS(key, client) {
+  const uid = DEVICE_PORTS[key].unit_id;
+  const prev = snapshot.devices[key];
+  try {
+    await client.ensureConnection();
+    const ir = await client.readIR(uid, 0, 3);
+    const now = new Date().toISOString();
+    snapshot.devices[key] = {
+      ...prev,
+      soc_pct:      ModbusClient.decodeScaled(ir[0], 1),
+      soh_pct:      ModbusClient.decodeScaled(ir[1], 1),
+      capacity_kwh: parseFloat(ModbusClient.decodeScaled(ir[2], 0.1).toFixed(1)),
+      soc_raw: ir[0], soh_raw: ir[1], capacity_raw: ir[2],
+      comm: { ok: true, last_ok_ts: now, last_error: null },
+    };
+  } catch (err) {
+    snapshot.devices[key] = { ...prev, comm: { ok: false, last_ok_ts: (prev.comm || {}).last_ok_ts || null, last_error: err.message } };
+    console.error(`[poller] ${key.toUpperCase()} poll error: ${err.message}`);
   }
 }
 
@@ -113,13 +194,20 @@ async function pollMultimeter() {
   }
 }
 
-async function pollAll(client) {
-  await pollPMS(client);
-  await pollMultimeter();
+// clients passed in from server.js: { pms, pcs1, pcs2, bms1, bms2 }
+async function pollAll(clients) {
+  await Promise.allSettled([
+    pollPMS(clients.pms),
+    pollPCS("pcs1", clients.pcs1),
+    pollPCS("pcs2", clients.pcs2),
+    pollBMS("bms1", clients.bms1),
+    pollBMS("bms2", clients.bms2),
+    pollMultimeter(),
+  ]);
   snapshot.ts = new Date().toISOString();
 }
 
-function startPolling(client, intervalMs = 1000) {
+function startPolling(clients, intervalMs = 1000) {
   let running = true;
   let isPolling = false;
 
@@ -128,8 +216,7 @@ function startPolling(client, intervalMs = 1000) {
       if (!isPolling) {
         isPolling = true;
         try {
-          await client.ensureConnection();
-          await pollAll(client);
+          await pollAll(clients);
         } catch (err) {
           console.error(`[poller] Poll cycle error: ${err.message}`);
         } finally {
@@ -142,13 +229,9 @@ function startPolling(client, intervalMs = 1000) {
     }
   }
 
-  loop(); // fire-and-forget (async)
+  loop();
 
-  return {
-    stop() {
-      running = false;
-    },
-  };
+  return { stop() { running = false; } };
 }
 
-module.exports = { getSnapshot, startPolling, DEVICE_DEFS };
+module.exports = { getSnapshot, startPolling, DEVICE_DEFS, DEVICE_PORTS };
