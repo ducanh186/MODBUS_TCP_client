@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Modbus TCP Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      padding: 20px;
+    }
+    h1 { text-align: center; margin-bottom: 4px; font-size: 1.4rem; color: #00d4ff; }
+    .subtitle { text-align: center; font-size: 0.82rem; color: #888; margin-bottom: 16px; }
+
+    /* ---- Summary cards ---- */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+      max-width: 1000px;
+      margin: 0 auto 18px;
+    }
+    .card {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 14px 16px;
+      border-left: 4px solid #00d4ff;
+    }
+    .card.warn  { border-left-color: #ffaa00; }
+    .card.error { border-left-color: #f44; }
+    .card-label { font-size: 0.72rem; text-transform: uppercase; color: #888; margin-bottom: 4px; letter-spacing: 0.5px; }
+    .card-value { font-size: 1.3rem; font-weight: 700; color: #fff; }
+    .card-sub   { font-size: 0.72rem; color: #666; margin-top: 3px; }
+
+    /* ---- Device table ---- */
+    table {
+      width: 100%;
+      max-width: 1060px;
+      margin: 0 auto 24px;
+      border-collapse: collapse;
+    }
+    th, td { padding: 7px 10px; text-align: center; border: 1px solid #333; }
+    th { background: #16213e; color: #00d4ff; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; }
+    td { font-size: 0.88rem; }
+    tr:nth-child(even) { background: rgba(255,255,255,0.03); }
+    tr:hover { background: rgba(0,212,255,0.08); }
+
+    /* Tooltip cells */
+    td[title] { cursor: help; text-decoration-style: dotted; }
+
+    .comm-ok    { color: #0f6; font-weight: 700; }
+    .comm-stale { color: #ffaa00; font-weight: 700; }
+    .comm-down  { color: #f44; font-weight: 700; }
+    .na { color: #555; }
+    .mismatch-ok   { color: #0f6; }
+    .mismatch-warn { color: #ffaa00; font-weight: 600; }
+    .mismatch-bad  { color: #f44; font-weight: 700; }
+
+    /* ---- Control panel ---- */
+    .control {
+      max-width: 520px;
+      margin: 0 auto;
+      background: #16213e;
+      border-radius: 8px;
+      padding: 18px 24px;
+    }
+    .control h2 { font-size: 1rem; margin-bottom: 4px; color: #00d4ff; }
+    .convention { font-size: 0.75rem; color: #aaa; margin-bottom: 12px; }
+    .convention b { color: #0f6; }
+    .convention .dis { color: #ff6b35; }
+    .control-row { display: flex; gap: 8px; align-items: center; }
+    .control-row input {
+      flex: 1; padding: 8px 12px;
+      border: 1px solid #444; border-radius: 4px;
+      background: #0f3460; color: #eee; font-size: 0.95rem;
+    }
+    .control-row input:focus { outline: none; border-color: #00d4ff; }
+    .control-row input:invalid { border-color: #f44; }
+    .btn { padding: 8px 16px; border: none; border-radius: 4px; font-weight: 700; cursor: pointer; font-size: 0.85rem; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-send { background: #00d4ff; color: #1a1a2e; }
+    .btn-send:hover:not(:disabled) { background: #00b8d9; }
+    .btn-stop { background: #f44; color: #fff; }
+    .btn-stop:hover:not(:disabled) { background: #d32f2f; }
+
+    .range-hint { font-size: 0.72rem; color: #666; margin-top: 4px; }
+
+    /* Presets */
+    .presets { display: flex; gap: 5px; margin-top: 10px; flex-wrap: wrap; }
+    .presets button {
+      padding: 4px 10px; border: 1px solid #444; border-radius: 4px;
+      background: transparent; font-size: 0.75rem; cursor: pointer;
+    }
+    .presets button:hover { border-color: #00d4ff; }
+    .preset-charge { color: #0f6; border-color: #0a5; }
+    .preset-charge:hover { border-color: #0f6 !important; }
+    .preset-discharge { color: #ff6b35; border-color: #b34a20; }
+    .preset-discharge:hover { border-color: #ff6b35 !important; }
+    .preset-zero { color: #aaa; }
+
+    .result { margin-top: 10px; font-size: 0.8rem; min-height: 18px; }
+    .result.ok  { color: #0f6; }
+    .result.err { color: #f44; }
+
+    /* ---- Timeline section ---- */
+    .timeline-section {
+      max-width: 1060px;
+      margin: 24px auto 0;
+      background: #16213e;
+      border-radius: 8px;
+      padding: 18px 24px;
+    }
+    .timeline-section h2 { font-size: 1rem; color: #00d4ff; margin-bottom: 12px; }
+    .timeline-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+    .timeline-controls select, .timeline-controls input[type=number] {
+      padding: 6px 10px; border: 1px solid #444; border-radius: 4px;
+      background: #0f3460; color: #eee; font-size: 0.85rem;
+    }
+    .timeline-controls select:focus, .timeline-controls input:focus { outline: none; border-color: #00d4ff; }
+    .timeline-status { font-size: 0.75rem; color: #888; margin-bottom: 8px; min-height: 16px; }
+    .timeline-table-wrap { overflow-x: auto; max-height: 320px; overflow-y: auto; }
+    .timeline-table-wrap table { margin: 0; }
+    .timeline-table-wrap th { position: sticky; top: 0; z-index: 1; }
+    .comm-ok-badge  { color: #0f6; font-size: 0.75rem; }
+    .comm-err-badge { color: #f44; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+
+  <h1>Modbus TCP Dashboard</h1>
+  <p class="subtitle">Auto-polling every 1s</p>
+
+  <!-- Summary cards row 1: connectivity + aggregates -->
+  <div class="cards" id="cards">
+    <div class="card" id="cardConn">
+      <div class="card-label">Connection</div>
+      <div class="card-value" id="cardConnVal">--</div>
+      <div class="card-sub" id="cardConnSub">--</div>
+    </div>
+    <div class="card" id="cardPower">
+      <div class="card-label">Total Active Power</div>
+      <div class="card-value" id="cardPowerVal">-- kW</div>
+      <div class="card-sub" id="cardPowerSub">PMS aggregate</div>
+    </div>
+    <div class="card" id="cardSOC">
+      <div class="card-label">SOC Average</div>
+      <div class="card-value" id="cardSOCVal">-- %</div>
+      <div class="card-sub" id="cardSOCSub">BMS average</div>
+    </div>
+    <div class="card" id="cardCmd">
+      <div class="card-label">Last Command</div>
+      <div class="card-value" id="cardCmdVal">--</div>
+      <div class="card-sub" id="cardCmdSub">No command sent yet</div>
+    </div>
+    <div class="card" id="cardMM">
+      <div class="card-label">Multimeter (RTU)</div>
+      <div class="card-value" id="cardMMVal">-- kW</div>
+      <div class="card-sub" id="cardMMSub">Point of connection</div>
+    </div>
+  </div>
+
+  <!-- Device cards row 2: per-device live status -->
+  <div class="cards" id="deviceCards" style="max-width:1200px;">
+    <!-- PCS1 card -->
+    <div class="card" id="cardPCS1">
+      <div class="card-label">PCS1 &nbsp;<span id="cardPCS1Comm" class="comm-down" style="font-size:0.65rem;">--</span></div>
+      <div class="card-value" id="cardPCS1Power">-- kW</div>
+      <div class="card-sub">Port 15021 | Active Power</div>
+    </div>
+    <!-- PCS2 card -->
+    <div class="card" id="cardPCS2">
+      <div class="card-label">PCS2 &nbsp;<span id="cardPCS2Comm" class="comm-down" style="font-size:0.65rem;">--</span></div>
+      <div class="card-value" id="cardPCS2Power">-- kW</div>
+      <div class="card-sub">Port 15022 | Active Power</div>
+    </div>
+    <!-- BMS1 card -->
+    <div class="card" id="cardBMS1">
+      <div class="card-label">BMS1 &nbsp;<span id="cardBMS1Comm" class="comm-down" style="font-size:0.65rem;">--</span></div>
+      <div class="card-value" id="cardBMS1SOC">-- %</div>
+      <div class="card-sub">Port 15024 | SOC / <span id="cardBMS1Cap">-- kWh</span></div>
+    </div>
+    <!-- BMS2 card -->
+    <div class="card" id="cardBMS2">
+      <div class="card-label">BMS2 &nbsp;<span id="cardBMS2Comm" class="comm-down" style="font-size:0.65rem;">--</span></div>
+      <div class="card-value" id="cardBMS2SOC">-- %</div>
+      <div class="card-sub">Port 15025 | SOC / <span id="cardBMS2Cap">-- kWh</span></div>
+    </div>
+  </div>
+
+  <!-- Device table -->
+  <table>
+    <thead>
+      <tr>
+        <th>Device</th>
+        <th>Port</th>
+        <th>Unit ID</th>
+        <th>Demand (kW)</th>
+        <th>Active Power (kW)</th>
+        <th>ΔP (kW)</th>
+        <th>SOC (%)</th>
+        <th>SOH (%)</th>
+        <th>Capacity (kWh)</th>
+        <th>Comm</th>
+      </tr>
+    </thead>
+    <tbody id="deviceTable">
+      <tr><td colspan="10" class="na">Waiting for first poll...</td></tr>
+    </tbody>
+  </table>
+
+  <!-- Control panel -->
+  <div class="control">
+    <h2>Set PMS demand_control_power</h2>
+    <div class="convention">
+      Sign convention: <b>-kW = Charge</b> (SOC rises) &nbsp;|&nbsp; <span class="dis">+kW = Discharge</span> (SOC falls)
+    </div>
+    <div class="control-row">
+      <input type="number" id="demandInput" step="0.1" min="-3276.8" max="3276.7" placeholder="kW (-3276.8 to 3276.7)" />
+      <button class="btn btn-send" id="sendBtn" onclick="sendDemand()">Send (FC06)</button>
+      <button class="btn btn-stop" id="stopBtn" onclick="sendStop()">STOP (0)</button>
+    </div>
+    <div class="range-hint">Range: -3276.8 .. 3276.7 kW | Step: 0.1 kW</div>
+    <div class="presets">
+      <button class="preset-charge" onclick="setPreset(-3276.8)">-3276.8 (Max Charge)</button>
+      <button class="preset-charge" onclick="setPreset(-1000)">-1000</button>
+      <button class="preset-charge" onclick="setPreset(-500)">-500</button>
+      <button class="preset-charge" onclick="setPreset(-100)">-100</button>
+      <button class="preset-charge" onclick="setPreset(-50)">-50</button>
+      <button class="preset-zero" onclick="setPreset(0)">0 (Stop)</button>
+      <button class="preset-discharge" onclick="setPreset(50)">+50</button>
+      <button class="preset-discharge" onclick="setPreset(100)">+100</button>
+      <button class="preset-discharge" onclick="setPreset(500)">+500</button>
+      <button class="preset-discharge" onclick="setPreset(1000)">+1000</button>
+      <button class="preset-discharge" onclick="setPreset(3276.7)">+3276.7 (Max Discharge)</button>
+    </div>
+    <div class="result" id="cmdResult"></div>
+  </div>
+
+  <!-- Timeline section -->
+  <div class="timeline-section">
+    <h2>Historical Timeline (from PostgreSQL)</h2>
+    <div class="timeline-controls">
+      <label style="font-size:0.8rem;color:#aaa">Device:</label>
+      <select id="tlDevice">
+        <option value="pms">PMS</option>
+        <option value="multimeter">Multimeter</option>
+      </select>
+      <label style="font-size:0.8rem;color:#aaa">Metric:</label>
+      <select id="tlMetric">
+        <option value="active_power_kw">active_power_kw</option>
+        <option value="demand_control_power_kw">demand_control_power_kw</option>
+        <option value="soc_pct">soc_pct</option>
+        <option value="soh_pct">soh_pct</option>
+        <option value="capacity_kwh">capacity_kwh</option>
+      </select>
+      <label style="font-size:0.8rem;color:#aaa">Last:</label>
+      <input type="number" id="tlMinutes" value="60" min="1" max="1440" style="width:70px" />
+      <span style="font-size:0.8rem;color:#aaa">min</span>
+      <button class="btn btn-send" onclick="loadTimeline()">Load</button>
+      <label style="font-size:0.8rem;color:#aaa;margin-left:8px">
+        <input type="checkbox" id="tlAutoRefresh" style="vertical-align:middle" /> Auto-refresh (30s)
+      </label>
+    </div>
+    <div class="timeline-status" id="tlStatus">Click "Load" to query database.</div>
+    <div class="timeline-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Device</th>
+            <th>Metric</th>
+            <th>Value</th>
+            <th>Unit</th>
+            <th>Comm OK</th>
+          </tr>
+        </thead>
+        <tbody id="tlTableBody">
+          <tr><td colspan="6" class="na">No data loaded.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    let pollCount = 0;
+    let currentDemandKw = null; // track to disable Send when unchanged
+
+    // ---- Comm status logic ----
+    function getCommStatus(comm) {
+      if (!comm) return { cls: "comm-down", text: "NO DATA", tip: "" };
+      if (!comm.ok) return { cls: "comm-down", text: "DOWN", tip: comm.last_error || "" };
+      if (!comm.last_ok_ts) return { cls: "comm-down", text: "DOWN", tip: "never connected" };
+      const ageSec = (Date.now() - new Date(comm.last_ok_ts).getTime()) / 1000;
+      if (ageSec > 10) return { cls: "comm-down",  text: "DOWN",  tip: `Last OK ${ageSec.toFixed(0)}s ago` };
+      if (ageSec > 3)  return { cls: "comm-stale", text: "STALE", tip: `Last OK ${ageSec.toFixed(0)}s ago` };
+      return { cls: "comm-ok", text: "OK", tip: `${ageSec.toFixed(1)}s ago` };
+    }
+
+    // ---- Tooltip builder ----
+    function tip(raw, meta) {
+      if (raw === null || raw === undefined || !meta) return "";
+      return `${meta.reg} raw=${raw} scale=${meta.scale} (${meta.fc})`;
+    }
+
+    // ---- ΔP mismatch ----
+    function deltaPHtml(demand, actual) {
+      if (demand === null || actual === null || demand === undefined || actual === undefined) return '<span class="na">\u2014</span>';
+      const dp = parseFloat((actual - demand).toFixed(1));
+      const abs = Math.abs(dp);
+      let cls = "mismatch-ok";
+      if (abs > 3.0)      cls = "mismatch-bad";
+      else if (abs > 1.0) cls = "mismatch-warn";
+      const sign = dp >= 0 ? "+" : "";
+      return `<span class="${cls}">${sign}${dp}</span>`;
+    }
+
+    // ---- Polling ----
+    async function fetchSnapshot() {
+      try {
+        const resp = await fetch("/api/snapshot");
+        const snap = await resp.json();
+        pollCount++;
+        renderSnapshot(snap);
+      } catch (err) {
+        document.getElementById("cardConnVal").textContent = "FETCH ERR";
+      }
+    }
+
+    function renderSnapshot(snap) {
+      // ---- Summary cards ----
+      const d = snap.devices;
+      const pms = d.pms;
+      const pcs1 = d.pcs1;
+      const pcs2 = d.pcs2;
+      const bms1 = d.bms1;
+      const bms2 = d.bms2;
+
+      // Connection card — check all 5 TCP devices
+      const allDevices = [d.pms, d.pcs1, d.pcs2, d.bms1, d.bms2];
+      const allComms = allDevices.map(x => x && x.comm);
+      const allOk = allComms.every(c => c && c.ok);
+      const downCount = allComms.filter(c => !c || !c.ok).length;
+      const cfg = snap.config || {};
+      const connCard = document.getElementById("cardConn");
+      if (allOk) {
+        document.getElementById("cardConnVal").textContent = "ALL OK";
+        connCard.className = "card";
+      } else {
+        document.getElementById("cardConnVal").textContent = `${downCount} DOWN`;
+        connCard.className = "card error";
+      }
+      document.getElementById("cardConnSub").textContent = `${cfg.host || "?"}:15020–15025 | Poll #${pollCount}`;
+
+      // Power card
+      const totalPower = pms ? pms.total_active_power_kw : null;
+      document.getElementById("cardPowerVal").textContent = totalPower !== null ? `${totalPower} kW` : "-- kW";
+      if (pms && pms.demand_control_power_kw !== null) {
+        const tp = totalPower || 0;
+        const dm = pms.demand_control_power_kw;
+        const dpK = parseFloat((tp - dm).toFixed(1));
+        document.getElementById("cardPowerSub").textContent = `Demand: ${dm} kW | ΔP: ${dpK >= 0 ? "+" : ""}${dpK} kW`;
+      }
+
+      // SOC card — average of BMS1 + BMS2
+      const socVals = [bms1, bms2].map(b => b && b.soc_pct !== null ? b.soc_pct : null).filter(v => v !== null);
+      const socAvg = socVals.length ? parseFloat((socVals.reduce((a, b) => a + b, 0) / socVals.length).toFixed(1)) : null;
+      document.getElementById("cardSOCVal").textContent = socAvg !== null ? `${socAvg} %` : "-- %";
+      const socCard = document.getElementById("cardSOC");
+      if (socAvg !== null && socAvg <= 10) socCard.className = "card error";
+      else if (socAvg !== null && socAvg <= 20) socCard.className = "card warn";
+      else socCard.className = "card";
+      if (socVals.length) document.getElementById("cardSOCSub").textContent = `BMS1: ${bms1 ? (bms1.soc_pct ?? "--") : "--"}% | BMS2: ${bms2 ? (bms2.soc_pct ?? "--") : "--"}%`;
+
+      // Last command card
+      const lc = snap.last_command;
+      if (lc && lc.kw !== null) {
+        const lcLabel = lc.kw > 0 ? "Discharge" : lc.kw < 0 ? "Charge" : "Stop";
+        document.getElementById("cardCmdVal").textContent = `${lc.kw} kW (${lcLabel})`;
+        const lcTime = lc.ts ? new Date(lc.ts).toLocaleTimeString() : "";
+        document.getElementById("cardCmdSub").textContent = lc.error ? `ERR: ${lc.error}` : `raw=${lc.raw} @ ${lcTime}`;
+        document.getElementById("cardCmd").className = lc.error ? "card error" : "card";
+      }
+
+      // Track current demand for Send button disable logic
+      currentDemandKw = pms ? pms.demand_control_power_kw : null;
+      updateSendBtnState();
+
+      // Multimeter card
+      const mm = d.multimeter;
+      if (mm && mm.active_power_kw !== null) {
+        document.getElementById("cardMMVal").textContent = `${mm.active_power_kw} kW`;
+        const mmComm = getCommStatus(mm.comm);
+        document.getElementById("cardMMSub").textContent = `RTU slave=${mm.unit_id || 10} | ${mmComm.text}`;
+        document.getElementById("cardMM").className = mmComm.cls === "comm-ok" ? "card" : "card warn";
+      } else {
+        document.getElementById("cardMMVal").textContent = "-- kW";
+        document.getElementById("cardMMSub").textContent = mm ? "No data" : "Bridge not running";
+        document.getElementById("cardMM").className = "card warn";
+      }
+
+      // ---- Per-device cards (PCS1, PCS2, BMS1, BMS2) ----
+      updatePCSCard("PCS1", "cardPCS1", pcs1);
+      updatePCSCard("PCS2", "cardPCS2", pcs2);
+      updateBMSCard("BMS1", "cardBMS1", bms1);
+      updateBMSCard("BMS2", "cardBMS2", bms2);
+
+      // ---- Device table ----
+      const rows = [
+        deviceRowPMS("PMS", d.pms),
+        deviceRowPCS("PCS1", d.pcs1, 15021),
+        deviceRowPCS("PCS2", d.pcs2, 15022),
+        deviceRowBMS("BMS1", d.bms1, 15024),
+        deviceRowBMS("BMS2", d.bms2, 15025),
+        mmRow(d.multimeter),
+      ];
+      document.getElementById("deviceTable").innerHTML = rows.join("");
+    }
+
+    function updatePCSCard(label, cardId, dev) {
+      const cs = getCommStatus(dev && dev.comm);
+      const pwr = dev && dev.active_power_kw !== null ? `${dev.active_power_kw} kW` : "-- kW";
+      document.getElementById(cardId + "Power").textContent = pwr;
+      const span = document.getElementById(cardId + "Comm");
+      span.textContent = cs.text;
+      span.className = cs.cls;
+      const card = document.getElementById(cardId);
+      card.className = cs.cls === "comm-ok" ? "card" : (cs.cls === "comm-stale" ? "card warn" : "card error");
+    }
+
+    function updateBMSCard(label, cardId, dev) {
+      const cs = getCommStatus(dev && dev.comm);
+      const soc = dev && dev.soc_pct !== null ? `${dev.soc_pct} %` : "-- %";
+      const cap = dev && dev.capacity_kwh !== null ? `${dev.capacity_kwh} kWh` : "-- kWh";
+      document.getElementById(cardId + "SOC").textContent = soc;
+      document.getElementById(cardId + "Cap").textContent = cap;
+      const span = document.getElementById(cardId + "Comm");
+      span.textContent = cs.text;
+      span.className = cs.cls;
+      const card = document.getElementById(cardId);
+      let cls = "card";
+      if (cs.cls !== "comm-ok") cls = cs.cls === "comm-stale" ? "card warn" : "card error";
+      else if (dev && dev.soc_pct !== null && dev.soc_pct <= 10) cls = "card error";
+      else if (dev && dev.soc_pct !== null && dev.soc_pct <= 20) cls = "card warn";
+      card.className = cls;
+    }
+
+    function deviceRowPMS(label, dev) {
+      if (!dev) return `<tr><td><b>${label}</b></td><td colspan="9" class="na">No data</td></tr>`;
+      const cs = getCommStatus(dev.comm);
+      return `<tr>
+        <td><b>${label}</b></td>
+        <td>15020</td>
+        <td>${dev.unit_id}</td>
+        <td title="${tip(dev.demand_control_power_raw, dev.demand_control_power_meta)}">${fmtVal(dev.demand_control_power_kw)}</td>
+        <td title="${tip(dev.total_active_power_raw, dev.total_active_power_meta)}">${fmtVal(dev.total_active_power_kw)}</td>
+        <td>${deltaPHtml(dev.demand_control_power_kw, dev.total_active_power_kw)}</td>
+        <td title="${tip(dev.soc_avg_raw, dev.soc_avg_meta)}">${fmtVal(dev.soc_avg_pct)}</td>
+        <td title="${tip(dev.soh_avg_raw, dev.soh_avg_meta)}">${fmtVal(dev.soh_avg_pct)}</td>
+        <td title="${tip(dev.capacity_total_raw, dev.capacity_total_meta)}">${fmtVal(dev.capacity_total_kwh)}</td>
+        <td class="${cs.cls}" title="${cs.tip}">${cs.text}</td>
+      </tr>`;
+    }
+
+    function deviceRowPCS(label, dev, port) {
+      if (!dev) return `<tr><td><b>${label}</b></td><td>${port}</td><td colspan="8" class="na">No data</td></tr>`;
+      const cs = getCommStatus(dev.comm);
+      const na = '<span class="na">\u2014</span>';
+      return `<tr>
+        <td><b>${label}</b></td>
+        <td>${port}</td>
+        <td>${dev.unit_id}</td>
+        <td class="na">${na}</td>
+        <td title="${tip(dev.active_power_raw, dev.active_power_meta)}">${fmtVal(dev.active_power_kw)}</td>
+        <td class="na">${na}</td>
+        <td class="na">${na}</td>
+        <td class="na">${na}</td>
+        <td class="na">${na}</td>
+        <td class="${cs.cls}" title="${cs.tip}">${cs.text}</td>
+      </tr>`;
+    }
+
+    function deviceRowBMS(label, dev, port) {
+      if (!dev) return `<tr><td><b>${label}</b></td><td>${port}</td><td colspan="8" class="na">No data</td></tr>`;
+      const cs = getCommStatus(dev.comm);
+      const na = '<span class="na">\u2014</span>';
+      return `<tr>
+        <td><b>${label}</b></td>
+        <td>${port}</td>
+        <td>${dev.unit_id}</td>
+        <td class="na">${na}</td>
+        <td class="na">${na}</td>
+        <td class="na">${na}</td>
+        <td title="${tip(dev.soc_raw, dev.soc_meta)}">${fmtVal(dev.soc_pct)}</td>
+        <td title="${tip(dev.soh_raw, dev.soh_meta)}">${fmtVal(dev.soh_pct)}</td>
+        <td title="${tip(dev.capacity_raw, dev.capacity_meta)}">${fmtVal(dev.capacity_kwh)}</td>
+        <td class="${cs.cls}" title="${cs.tip}">${cs.text}</td>
+      </tr>`;
+    }
+
+    function mmRow(dev) {
+      if (!dev) return `<tr><td><b>Multimeter</b></td><td>RTU</td><td colspan="8" class="na">Bridge not running</td></tr>`;
+      const cs = getCommStatus(dev.comm);
+      const na = '<span class="na">\u2014</span>';
+      return `<tr>
+        <td><b>Multimeter (RTU)</b></td>
+        <td>RTU</td>
+        <td>${dev.unit_id || 10}</td>
+        <td class="na">${na}</td>
+        <td title="${tip(dev.active_power_raw, dev.active_power_meta)}">${fmtVal(dev.active_power_kw)}</td>
+        <td class="na">${na}</td>
+        <td class="na">${na}</td>
+        <td class="na">${na}</td>
+        <td class="na">${na}</td>
+        <td class="${cs.cls}" title="${cs.tip}">${cs.text}</td>
+      </tr>`;
+    }
+
+    function fmtVal(v) {
+      if (v === null || v === undefined) return '<span class="na">\u2014</span>';
+      return v;
+    }
+
+    // ---- Send demand ----
+    async function sendDemand() {
+      const input = document.getElementById("demandInput");
+      const result = document.getElementById("cmdResult");
+      const kw = parseFloat(input.value);
+      if (isNaN(kw)) { result.className = "result err"; result.textContent = "Enter a valid number."; return; }
+      if (kw < -3276.8 || kw > 3276.7) { result.className = "result err"; result.textContent = "Range: -3276.8 to 3276.7 kW."; return; }
+      await doSend(kw);
+    }
+
+    async function sendStop() { await doSend(0); }
+
+    async function doSend(kw) {
+      const btn = document.getElementById("sendBtn");
+      const stopBtn = document.getElementById("stopBtn");
+      const result = document.getElementById("cmdResult");
+      btn.disabled = true; stopBtn.disabled = true;
+      result.className = "result"; result.textContent = "Sending...";
+      try {
+        const resp = await fetch("/api/pms/demand", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ demand_control_power_kw: kw }),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+          const label = kw > 0 ? "Discharge" : kw < 0 ? "Charge" : "Stop";
+          result.className = "result ok";
+          result.textContent = `OK \u2014 ${label} ${data.written_kw} kW (raw=${data.written_raw}) @ ${new Date().toLocaleTimeString()}`;
+          document.getElementById("demandInput").value = kw;
+        } else {
+          result.className = "result err";
+          result.textContent = `Error: ${data.error}`;
+        }
+      } catch (err) {
+        result.className = "result err";
+        result.textContent = `Network error: ${err.message}`;
+      } finally {
+        btn.disabled = false; stopBtn.disabled = false;
+        updateSendBtnState();
+      }
+    }
+
+    function setPreset(kw) {
+      document.getElementById("demandInput").value = kw;
+      updateSendBtnState();
+    }
+
+    function updateSendBtnState() {
+      const input = document.getElementById("demandInput");
+      const btn = document.getElementById("sendBtn");
+      const kw = parseFloat(input.value);
+      // Disable if: NaN, out of range, or same as current demand (to 1 decimal)
+      if (isNaN(kw) || kw < -3276.8 || kw > 3276.7) { btn.disabled = true; return; }
+      if (currentDemandKw !== null && parseFloat(kw.toFixed(1)) === parseFloat(currentDemandKw.toFixed ? currentDemandKw.toFixed(1) : currentDemandKw)) {
+        btn.disabled = true;
+      } else {
+        btn.disabled = false;
+      }
+    }
+
+    // Events
+    document.getElementById("demandInput").addEventListener("input", updateSendBtnState);
+    document.getElementById("demandInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") sendDemand();
+    });
+
+    // Start polling
+    fetchSnapshot();
+    setInterval(fetchSnapshot, 1000);
+
+    // ---- Timeline ----
+    let tlAutoInterval = null;
+
+    async function loadTimeline() {
+      const device  = document.getElementById("tlDevice").value;
+      const metric  = document.getElementById("tlMetric").value;
+      const minutes = parseInt(document.getElementById("tlMinutes").value) || 60;
+      const status  = document.getElementById("tlStatus");
+      const tbody   = document.getElementById("tlTableBody");
+
+      status.textContent = "Loading...";
+      try {
+        const resp = await fetch(`/api/timeline?device=${encodeURIComponent(device)}&metric=${encodeURIComponent(metric)}&minutes=${minutes}&limit=300`);
+        if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || resp.statusText); }
+        const rows = await resp.json();
+
+        if (!rows.length) {
+          tbody.innerHTML = `<tr><td colspan="6" class="na">No records found for ${device}/${metric} in last ${minutes} min.</td></tr>`;
+          status.textContent = `0 rows — no data yet (collector stores every 10s).`;
+          return;
+        }
+
+        // Newest first in header, oldest→newest in table (already ASC from DB)
+        const html = rows.slice().reverse().map(r => {
+          const ts = new Date(r.ts).toLocaleString();
+          const commBadge = r.comm_ok
+            ? '<span class="comm-ok-badge">✔</span>'
+            : '<span class="comm-err-badge">✘</span>';
+          return `<tr>
+            <td style="white-space:nowrap">${ts}</td>
+            <td>${r.device_id}</td>
+            <td>${r.metric}</td>
+            <td style="text-align:right">${r.value}</td>
+            <td>${r.unit ?? "—"}</td>
+            <td>${commBadge}</td>
+          </tr>`;
+        }).join("");
+
+        tbody.innerHTML = html;
+        const newest = new Date(rows[rows.length - 1].ts).toLocaleTimeString();
+        const oldest = new Date(rows[0].ts).toLocaleTimeString();
+        status.textContent = `${rows.length} rows | ${oldest} → ${newest} | device=${device} metric=${metric}`;
+      } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="6" class="na">Error: ${err.message}</td></tr>`;
+        status.textContent = `Error: ${err.message}`;
+      }
+    }
+
+    // Auto-refresh toggle
+    document.getElementById("tlAutoRefresh").addEventListener("change", (e) => {
+      if (e.target.checked) {
+        tlAutoInterval = setInterval(loadTimeline, 30_000);
+      } else {
+        clearInterval(tlAutoInterval);
+        tlAutoInterval = null;
+      }
+    });
+  </script>
+</body>
+</html>
