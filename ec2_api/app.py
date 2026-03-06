@@ -3,13 +3,17 @@ EC2 API Server — Bài tập 4
 Flask API for device telemetry ingest (→ S3 pipeline) and command management.
 
 Endpoints:
-  POST /auth/token           — authenticate, return JWT (60s TTL)
-  POST /api/device           — receive device JSON, save to S3
-  GET  /api/device           — read device_data from RDS
-  POST /api/commands         — frontend creates charge/discharge command
-  GET  /api/commands         — local polls pending commands
-  PATCH /api/commands/<id>   — local marks command as executed
-  GET  /                     — serve frontend
+  POST /auth/token             — authenticate, return JWT (60s TTL)
+  POST /api/device             — receive device JSON, save to S3
+  GET  /api/device             — read device_data from RDS
+  POST /api/commands           — frontend creates charge/discharge command
+  GET  /api/commands           — local polls pending commands
+  PATCH /api/commands/<id>     — local marks command as executed
+  POST /api/schedules          — create charge/discharge schedule
+  GET  /api/schedules          — list schedules (optional ?status=)
+  DELETE /api/schedules/<id>   — soft-delete (cancel) a schedule
+  GET  /api/schedules/active   — active + future schedules
+  GET  /                       — serve frontend
 """
 
 import json
@@ -192,8 +196,9 @@ def auth_token():
 @app.route("/api/device", methods=["POST"])
 @require_auth
 def post_device_data():
-    """Receive device JSON telemetry → save to S3 raw/ prefix.
-    S3 event → SQS → Lambda → RDS pipeline handles the rest.
+    """Receive device JSON telemetry → save to S3 raw/ prefix + direct RDS write.
+    Direct RDS write ensures snapshot is fresh immediately.
+    S3 event → SQS → Lambda → RDS pipeline is kept as backup/archive.
     """
     data = request.get_json(force=True)
 
@@ -213,13 +218,31 @@ def post_device_data():
     data["_s3_key"] = s3_key
     data["_received_at"] = datetime.now(timezone.utc).isoformat()
 
-    # Upload to S3
-    s3.put_object(
-        Bucket=S3_BUCKET,
-        Key=s3_key,
-        Body=json.dumps(data),
-        ContentType="application/json",
-    )
+    # Upload to S3 (archive + Lambda pipeline backup)
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=s3_key,
+            Body=json.dumps(data),
+            ContentType="application/json",
+        )
+    except Exception as exc:
+        logging.warning("S3 upload failed (non-fatal): %s", exc)
+
+    # Direct RDS write — ensures snapshot freshness without Lambda delay
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO device_data (device_id, ts, payload, s3_key) "
+            "VALUES (%s, %s::timestamptz, %s, %s)",
+            (device_id, ts, json.dumps(data), s3_key),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        logging.warning("Direct RDS write failed (non-fatal): %s", exc)
 
     return jsonify({"status": "saved", "s3_key": s3_key}), 201
 
@@ -446,7 +469,15 @@ def _build_snapshot_from_db():
     latest = {}
     for r in rows:
         device_id = r[0]
-        ts = r[1].isoformat() if r[1] else None
+        dt = r[1]
+        if dt is None:
+            ts = None
+        else:
+            # Ensure timezone-aware so browser parses as UTC (not local time)
+            if hasattr(dt, 'tzinfo') and dt.tzinfo is not None:
+                ts = dt.isoformat()  # already has +00:00
+            else:
+                ts = dt.isoformat() + "+00:00"  # force UTC label
         payload = r[2] if isinstance(r[2], dict) else json.loads(r[2])
         latest[device_id] = {"ts": ts, "payload": payload}
 
@@ -546,6 +577,27 @@ def _build_snapshot_from_db():
             "comm": {"ok": False, "last_ok_ts": None, "last_error": "not polled yet"},
         }
 
+    # Build Multimeter
+    def build_multimeter():
+        d = latest.get("Multimeter")
+        if d:
+            p = d["payload"]
+            ap = p.get("active_power")
+            raw = p.get("raw")
+            comm_ok = p.get("comm_ok", False)
+            return {
+                "unit_id": 10,
+                "active_power_kw": ap, "active_power_raw": raw,
+                "active_power_meta": {"reg": "IR0", "scale": 0.1, "unit": "kW", "fc": "FC04 (RTU)"},
+                "comm": _build_comm(d["ts"]) if comm_ok else {"ok": False, "last_ok_ts": None, "last_error": "RTU comm error"},
+            }
+        return {
+            "unit_id": 10,
+            "active_power_kw": None, "active_power_raw": None,
+            "active_power_meta": {"reg": "IR0", "scale": 0.1, "unit": "kW", "fc": "FC04 (RTU)"},
+            "comm": {"ok": False, "last_ok_ts": None, "last_error": "No RTU data received"},
+        }
+
     return {
         "ts": now,
         "devices": {
@@ -554,12 +606,7 @@ def _build_snapshot_from_db():
             "pcs2": build_pcs("PCS2", 15022),
             "bms1": build_bms("BMS1", 15024),
             "bms2": build_bms("BMS2", 15025),
-            "multimeter": {
-                "unit_id": 10,
-                "active_power_kw": None, "active_power_raw": None,
-                "active_power_meta": {"reg": "IR0", "scale": 0.1, "unit": "kW", "fc": "FC04 (RTU)"},
-                "comm": {"ok": False, "last_ok_ts": None, "last_error": "No RTU bridge on EC2"},
-            },
+            "multimeter": build_multimeter(),
         },
         "last_command": _last_command,
         "config": {
@@ -702,6 +749,171 @@ def api_timeline():
                     "comm_ok": True,
                 })
         return jsonify(result)
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Routes: Schedules (charge / discharge scheduling)
+# ---------------------------------------------------------------------------
+def _parse_iso(ts_str):
+    """Parse ISO 8601 string → timezone-aware datetime, or None."""
+    if not ts_str:
+        return None
+    ts_str = ts_str.replace("Z", "+00:00")
+    return datetime.fromisoformat(ts_str)
+
+
+def _schedule_row_to_dict(r):
+    """Convert a schedule DB row tuple to a JSON-serialisable dict."""
+    return {
+        "id": r[0],
+        "start_time": r[1].isoformat() if r[1] else None,
+        "end_time": r[2].isoformat() if r[2] else None,
+        "control_power_kw": float(r[3]) if r[3] is not None else None,
+        "status": r[4],
+        "created_at": r[5].isoformat() if r[5] else None,
+        "created_by": r[6],
+    }
+
+
+@app.route("/api/schedules", methods=["POST"])
+def post_schedule():
+    """Create a charge/discharge schedule with overlap validation.
+    Body: { start_time, end_time, control_power_kw, created_by? }
+    - Positive control_power_kw = discharge, negative = charge
+    - Returns 409 if overlapping an existing active schedule
+    """
+    data = request.get_json(force=True)
+
+    # --- Validate required fields ---
+    for field in ("start_time", "end_time", "control_power_kw"):
+        if field not in data or data[field] is None:
+            return jsonify({"error": f"{field} is required"}), 400
+
+    try:
+        start = _parse_iso(data["start_time"])
+        end = _parse_iso(data["end_time"])
+    except (ValueError, TypeError) as e:
+        return jsonify({"error": f"Invalid datetime format: {e}"}), 400
+
+    if start is None or end is None:
+        return jsonify({"error": "start_time and end_time must be valid ISO 8601"}), 400
+    if end <= start:
+        return jsonify({"error": "end_time must be after start_time"}), 400
+
+    power_kw = float(data["control_power_kw"])
+    created_by = data.get("created_by", "frontend")
+
+    # --- Overlap check against active schedules ---
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT id, start_time, end_time, control_power_kw "
+            "FROM schedules "
+            "WHERE status = 'active' "
+            "  AND start_time < %s AND end_time > %s",
+            (end, start),
+        )
+        overlaps = cur.fetchall()
+        if overlaps:
+            conflicts = [{
+                "id": o[0],
+                "start_time": o[1].isoformat() if o[1] else None,
+                "end_time": o[2].isoformat() if o[2] else None,
+                "control_power_kw": float(o[3]) if o[3] is not None else None,
+            } for o in overlaps]
+            return jsonify({
+                "error": "Schedule overlaps with existing active schedule(s)",
+                "conflicts": conflicts,
+            }), 409
+
+        # --- Insert ---
+        cur.execute(
+            "INSERT INTO schedules (start_time, end_time, control_power_kw, created_by) "
+            "VALUES (%s, %s, %s, %s) "
+            "RETURNING id, start_time, end_time, control_power_kw, status, created_at, created_by",
+            (start, end, power_kw, created_by),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return jsonify(_schedule_row_to_dict(row)), 201
+    except Exception as exc:
+        conn.rollback()
+        logging.error("POST /api/schedules failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.route("/api/schedules", methods=["GET"])
+def get_schedules():
+    """List schedules.  Optional query: ?status=active&limit=50"""
+    status_filter = request.args.get("status")
+    limit = min(int(request.args.get("limit", "50")), 200)
+
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        if status_filter:
+            cur.execute(
+                "SELECT id, start_time, end_time, control_power_kw, status, created_at, created_by "
+                "FROM schedules WHERE status = %s "
+                "ORDER BY start_time ASC LIMIT %s",
+                (status_filter, limit),
+            )
+        else:
+            cur.execute(
+                "SELECT id, start_time, end_time, control_power_kw, status, created_at, created_by "
+                "FROM schedules ORDER BY start_time ASC LIMIT %s",
+                (limit,),
+            )
+        rows = cur.fetchall()
+        return jsonify([_schedule_row_to_dict(r) for r in rows])
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.route("/api/schedules/active", methods=["GET"])
+def get_active_schedules():
+    """Active schedules whose end_time is still in the future."""
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT id, start_time, end_time, control_power_kw, status, created_at, created_by "
+            "FROM schedules "
+            "WHERE status = 'active' AND end_time > now() "
+            "ORDER BY start_time ASC"
+        )
+        rows = cur.fetchall()
+        return jsonify([_schedule_row_to_dict(r) for r in rows])
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.route("/api/schedules/<int:schedule_id>", methods=["DELETE"])
+def delete_schedule(schedule_id):
+    """Soft-delete: set status = 'canceled'."""
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE schedules SET status = 'canceled' "
+            "WHERE id = %s AND status = 'active' "
+            "RETURNING id",
+            (schedule_id,),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return jsonify({"error": "Schedule not found or already canceled"}), 404
+        return jsonify({"ok": True, "id": schedule_id, "status": "canceled"})
     finally:
         cur.close()
         conn.close()
