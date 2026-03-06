@@ -294,8 +294,8 @@
       if (!comm.ok) return { cls: "comm-down", text: "DOWN", tip: comm.last_error || "" };
       if (!comm.last_ok_ts) return { cls: "comm-down", text: "DOWN", tip: "never connected" };
       const ageSec = (Date.now() - new Date(comm.last_ok_ts).getTime()) / 1000;
-      if (ageSec > 10) return { cls: "comm-down",  text: "DOWN",  tip: `Last OK ${ageSec.toFixed(0)}s ago` };
-      if (ageSec > 3)  return { cls: "comm-stale", text: "STALE", tip: `Last OK ${ageSec.toFixed(0)}s ago` };
+      if (ageSec > 60) return { cls: "comm-down",  text: "DOWN",  tip: `Last OK ${ageSec.toFixed(0)}s ago` };
+      if (ageSec > 30) return { cls: "comm-stale", text: "STALE", tip: `Last OK ${ageSec.toFixed(0)}s ago` };
       return { cls: "comm-ok", text: "OK", tip: `${ageSec.toFixed(1)}s ago` };
     }
 
