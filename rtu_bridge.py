@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import struct
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from pymodbus.client import ModbusSerialClient
+import serial
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,6 +23,53 @@ def _u16_to_int16(x: int) -> int:
 
 def decode_power_kw(reg_u16: int) -> float:
     return _u16_to_int16(reg_u16) * 0.1
+
+
+def _crc16(data: bytes) -> int:
+    """Calculate Modbus CRC16."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return crc
+
+
+def _rtu_read_input_registers(ser: serial.Serial, slave_id: int, start: int, count: int) -> int | None:
+    """Send FC04 request and return register value (or None on error)."""
+    # Build request: slave, FC04, start_hi, start_lo, count_hi, count_lo
+    request = struct.pack(">BBHH", slave_id, 0x04, start, count)
+    crc = _crc16(request)
+    request += struct.pack("<H", crc)  # CRC is little-endian
+    
+    ser.reset_input_buffer()
+    ser.write(request)
+    
+    # Expected response: slave, FC04, byte_count, data..., CRC (2 bytes)
+    # For 1 register: 1+1+1+2+2 = 7 bytes
+    expected_len = 3 + (count * 2) + 2
+    response = ser.read(expected_len)
+    
+    if len(response) < expected_len:
+        raise ValueError(f"Short response: got {len(response)} bytes, expected {expected_len}")
+    
+    # Verify CRC
+    response_crc = struct.unpack("<H", response[-2:])[0]
+    calculated_crc = _crc16(response[:-2])
+    if response_crc != calculated_crc:
+        raise ValueError(f"CRC mismatch: got 0x{response_crc:04X}, expected 0x{calculated_crc:04X}")
+    
+    # Check for exception response
+    if response[1] & 0x80:
+        raise ValueError(f"Modbus exception: code {response[2]}")
+    
+    # Parse data (big-endian)
+    data_bytes = response[3:-2]
+    values = struct.unpack(f">{count}H", data_bytes)
+    return values[0] if count == 1 else values
 
 
 _snapshot_lock = threading.Lock()
@@ -44,33 +92,28 @@ def _poller(
 
     while not stop_event.is_set():
         try:
-            client = ModbusSerialClient(
-                port=com_port,
-                baudrate=baudrate,
-                bytesize=8,
-                parity="N",
-                stopbits=1,
-                timeout=2,
-            )
-            client.connect()
-            rr = client.read_input_registers(0, count=1, device_id=slave_id)
-            client.close()
+            # Use deferred open pattern for com0com compatibility
+            ser = serial.Serial()
+            ser.port = com_port
+            ser.baudrate = baudrate
+            ser.bytesize = 8
+            ser.parity = "N"
+            ser.stopbits = 1
+            ser.timeout = 2
+            ser.open()
+            
+            raw = _rtu_read_input_registers(ser, slave_id, start=0, count=1)
+            ser.close()
 
-            if not rr.isError():
-                raw = rr.registers[0]
-                kw = round(decode_power_kw(raw), 1)
-                ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-                with _snapshot_lock:
-                    _snapshot = {
-                        "active_power_kw": kw,
-                        "raw": raw,
-                        "comm": {"ok": True, "last_ok_ts": ts, "last_error": None},
-                    }
-            else:
-                with _snapshot_lock:
-                    _snapshot["comm"]["ok"] = False
-                    _snapshot["comm"]["last_error"] = f"Modbus error: {rr}"
-                log.warning(f"RTU read error: {rr}")
+            kw = round(decode_power_kw(raw), 1)
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+            with _snapshot_lock:
+                _snapshot = {
+                    "active_power_kw": kw,
+                    "raw": raw,
+                    "comm": {"ok": True, "last_ok_ts": ts, "last_error": None},
+                }
+            log.info(f"[OK] raw=0x{raw:04X} => {kw:+.1f} kW")
         except Exception as exc:
             with _snapshot_lock:
                 _snapshot["comm"]["ok"] = False
