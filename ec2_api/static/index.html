@@ -126,6 +126,65 @@
     .timeline-table-wrap th { position: sticky; top: 0; z-index: 1; }
     .comm-ok-badge  { color: #0f6; font-size: 0.75rem; }
     .comm-err-badge { color: #f44; font-size: 0.75rem; }
+
+    /* ---- Schedule Manager ---- */
+    .schedule-section {
+      max-width: 1060px;
+      margin: 24px auto 0;
+      background: #16213e;
+      border-radius: 8px;
+      padding: 18px 24px;
+    }
+    .schedule-section h2 { font-size: 1rem; color: #00d4ff; margin-bottom: 12px; }
+    .sched-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 14px; }
+    .sched-form .field { display: flex; flex-direction: column; gap: 3px; }
+    .sched-form .field label { font-size: 0.72rem; color: #aaa; text-transform: uppercase; letter-spacing: 0.4px; }
+    .sched-form input[type="datetime-local"],
+    .sched-form input[type="number"] {
+      padding: 7px 10px; border: 1px solid #444; border-radius: 4px;
+      background: #0f3460; color: #eee; font-size: 0.85rem;
+    }
+    .sched-form input:focus { outline: none; border-color: #00d4ff; }
+    .sched-form input:invalid { border-color: #f44; }
+    .btn-add { background: #00d4ff; color: #1a1a2e; padding: 8px 16px; border: none; border-radius: 4px; font-weight: 700; cursor: pointer; font-size: 0.85rem; align-self: flex-end; }
+    .btn-add:hover { background: #00b8d9; }
+    .btn-add:disabled { opacity: 0.4; cursor: not-allowed; }
+    .sched-result { font-size: 0.8rem; min-height: 18px; margin-bottom: 10px; }
+    .sched-result.ok  { color: #0f6; }
+    .sched-result.err { color: #f44; }
+
+    .sched-table-wrap { overflow-x: auto; max-height: 360px; overflow-y: auto; }
+    .sched-table-wrap table { margin: 0; }
+    .sched-table-wrap th { position: sticky; top: 0; z-index: 1; }
+    .sched-row-active { background: rgba(0, 212, 255, 0.12) !important; border-left: 3px solid #00d4ff; }
+    .sched-charge { color: #0f6; font-weight: 600; }
+    .sched-discharge { color: #ff6b35; font-weight: 600; }
+    .sched-status-active { color: #0f6; }
+    .sched-status-canceled { color: #888; }
+    .sched-status-expired { color: #ffaa00; }
+    .sched-status-running { color: #00d4ff; font-weight: 700; }
+    .btn-del { background: #f44; color: #fff; border: none; border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 0.75rem; font-weight: 600; }
+    .btn-del:hover { background: #d32f2f; }
+
+    /* Timeline bar */
+    .sched-timeline { margin-top: 14px; }
+    .sched-timeline h3 { font-size: 0.85rem; color: #aaa; margin-bottom: 6px; }
+    .sched-timeline-bar {
+      position: relative; height: 32px; background: #0f3460; border-radius: 4px; overflow: hidden;
+    }
+    .sched-timeline-bar .sched-block {
+      position: absolute; top: 2px; height: 28px; border-radius: 3px; opacity: 0.85;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.65rem; color: #fff; font-weight: 600; min-width: 2px;
+      cursor: default; overflow: hidden; white-space: nowrap;
+    }
+    .sched-block-charge { background: #0a5; }
+    .sched-block-discharge { background: #b34a20; }
+    .sched-block-active { border: 2px solid #00d4ff; opacity: 1; }
+    .sched-timeline-labels {
+      display: flex; justify-content: space-between;
+      font-size: 0.65rem; color: #666; margin-top: 2px;
+    }
   </style>
 </head>
 <body>
@@ -237,6 +296,51 @@
       <button class="preset-discharge" onclick="setPreset(3276.7)">+3276.7 (Max Discharge)</button>
     </div>
     <div class="result" id="cmdResult"></div>
+  </div>
+
+  <!-- Schedule Manager -->
+  <div class="schedule-section" id="scheduleSection">
+    <h2>Schedule Manager</h2>
+    <div class="sched-form">
+      <div class="field">
+        <label>Start Time</label>
+        <input type="datetime-local" id="schedStart" />
+      </div>
+      <div class="field">
+        <label>End Time</label>
+        <input type="datetime-local" id="schedEnd" />
+      </div>
+      <div class="field">
+        <label>Power (kW)</label>
+        <input type="number" id="schedPower" step="0.1" min="-1999" max="1999" placeholder="-1999 ~ +1999" style="width:140px" />
+      </div>
+      <button class="btn-add" id="schedAddBtn" onclick="addSchedule()">Add Schedule</button>
+    </div>
+    <div class="sched-result" id="schedResult"></div>
+
+    <div class="sched-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Start</th>
+            <th>End</th>
+            <th>Power (kW)</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="schedTableBody">
+          <tr><td colspan="6" class="na">Loading schedules...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="sched-timeline">
+      <h3>Visual Timeline (next 24h)</h3>
+      <div class="sched-timeline-bar" id="schedTimelineBar"></div>
+      <div class="sched-timeline-labels" id="schedTimelineLabels"></div>
+    </div>
   </div>
 
   <!-- Timeline section -->
@@ -650,6 +754,229 @@
         tlAutoInterval = null;
       }
     });
+
+    // ========== Schedule Manager ==========
+    let schedulesList = [];
+
+    // --- Client-side overlap check ---
+    function checkOverlapClient(startISO, endISO, excludeId) {
+      const newStart = new Date(startISO).getTime();
+      const newEnd   = new Date(endISO).getTime();
+      return schedulesList.filter(s => {
+        if (s.status !== 'active') return false;
+        if (excludeId && s.id === excludeId) return false;
+        const sStart = new Date(s.start_time).getTime();
+        const sEnd   = new Date(s.end_time).getTime();
+        return newStart < sEnd && newEnd > sStart;
+      });
+    }
+
+    // --- Load schedules ---
+    async function loadSchedules() {
+      try {
+        const resp = await fetch('/api/schedules?limit=100');
+        if (!resp.ok) throw new Error(resp.statusText);
+        schedulesList = await resp.json();
+        renderSchedules();
+        renderTimeline();
+      } catch (err) {
+        document.getElementById('schedTableBody').innerHTML =
+          `<tr><td colspan="6" class="na">Error: ${escHtml(err.message)}</td></tr>`;
+      }
+    }
+
+    // --- Render schedule table ---
+    function renderSchedules() {
+      const tbody = document.getElementById('schedTableBody');
+      if (!schedulesList.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="na">No schedules.</td></tr>';
+        return;
+      }
+      const now = Date.now();
+      tbody.innerHTML = schedulesList.map((s, i) => {
+        const start = new Date(s.start_time);
+        const end   = new Date(s.end_time);
+        const isRunning = s.status === 'active' && now >= start.getTime() && now < end.getTime();
+        const rowCls = isRunning ? 'sched-row-active' : '';
+
+        // Power color
+        const pwrCls = s.control_power_kw < 0 ? 'sched-charge' : (s.control_power_kw > 0 ? 'sched-discharge' : '');
+        const pwrLabel = s.control_power_kw < 0 ? '⚡ Charge' : (s.control_power_kw > 0 ? '🔋 Discharge' : 'Idle');
+
+        // Status
+        let statusCls, statusText;
+        if (isRunning) {
+          statusCls = 'sched-status-running'; statusText = '▶ RUNNING';
+        } else if (s.status === 'active') {
+          statusCls = 'sched-status-active';  statusText = 'Active';
+        } else if (s.status === 'canceled') {
+          statusCls = 'sched-status-canceled'; statusText = 'Canceled';
+        } else {
+          statusCls = 'sched-status-expired'; statusText = s.status;
+        }
+
+        const delBtn = s.status === 'active'
+          ? `<button class="btn-del" onclick="deleteSchedule(${s.id})">Delete</button>`
+          : '<span class="na">—</span>';
+
+        return `<tr class="${rowCls}">
+          <td>${s.id}</td>
+          <td style="white-space:nowrap">${start.toLocaleString()}</td>
+          <td style="white-space:nowrap">${end.toLocaleString()}</td>
+          <td class="${pwrCls}" title="${pwrLabel}">${s.control_power_kw} kW</td>
+          <td class="${statusCls}">${statusText}</td>
+          <td>${delBtn}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // --- Add schedule ---
+    async function addSchedule() {
+      const result = document.getElementById('schedResult');
+      const startInput = document.getElementById('schedStart').value;
+      const endInput   = document.getElementById('schedEnd').value;
+      const powerInput = document.getElementById('schedPower').value;
+
+      // Basic validation
+      if (!startInput || !endInput || powerInput === '') {
+        result.className = 'sched-result err';
+        result.textContent = 'All fields are required.';
+        return;
+      }
+      const power = parseFloat(powerInput);
+      if (isNaN(power) || power < -1999 || power > 1999) {
+        result.className = 'sched-result err';
+        result.textContent = 'Power must be between -1999 and +1999 kW.';
+        return;
+      }
+      const startISO = new Date(startInput).toISOString();
+      const endISO   = new Date(endInput).toISOString();
+      if (new Date(endISO) <= new Date(startISO)) {
+        result.className = 'sched-result err';
+        result.textContent = 'End time must be after start time.';
+        return;
+      }
+
+      // Client-side overlap check
+      const overlaps = checkOverlapClient(startISO, endISO, null);
+      if (overlaps.length > 0) {
+        const ids = overlaps.map(o => `#${o.id}`).join(', ');
+        result.className = 'sched-result err';
+        result.textContent = `Schedule overlaps with existing: ${ids}`;
+        return;
+      }
+
+      const btn = document.getElementById('schedAddBtn');
+      btn.disabled = true;
+      result.className = 'sched-result'; result.textContent = 'Saving...';
+
+      try {
+        const resp = await fetch('/api/schedules', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            start_time: startISO,
+            end_time: endISO,
+            control_power_kw: power,
+            created_by: 'frontend'
+          })
+        });
+        const data = await resp.json();
+        if (resp.status === 409) {
+          result.className = 'sched-result err';
+          result.textContent = data.error || 'Schedule overlaps with existing';
+          return;
+        }
+        if (!resp.ok) {
+          result.className = 'sched-result err';
+          result.textContent = data.error || 'Failed to create schedule';
+          return;
+        }
+        result.className = 'sched-result ok';
+        result.textContent = `Schedule #${data.id} created (${power < 0 ? 'Charge' : 'Discharge'} ${power} kW)`;
+        document.getElementById('schedStart').value = '';
+        document.getElementById('schedEnd').value = '';
+        document.getElementById('schedPower').value = '';
+        await loadSchedules();
+      } catch (err) {
+        result.className = 'sched-result err';
+        result.textContent = `Network error: ${escHtml(err.message)}`;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // --- Delete schedule ---
+    async function deleteSchedule(id) {
+      const result = document.getElementById('schedResult');
+      if (!confirm(`Cancel schedule #${id}?`)) return;
+      try {
+        const resp = await fetch(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok) {
+          result.className = 'sched-result err';
+          result.textContent = data.error || 'Failed to delete';
+          return;
+        }
+        result.className = 'sched-result ok';
+        result.textContent = `Schedule #${id} canceled.`;
+        await loadSchedules();
+      } catch (err) {
+        result.className = 'sched-result err';
+        result.textContent = `Network error: ${escHtml(err.message)}`;
+      }
+    }
+
+    // --- Render visual timeline (next 24h) ---
+    function renderTimeline() {
+      const bar = document.getElementById('schedTimelineBar');
+      const labels = document.getElementById('schedTimelineLabels');
+      const now = Date.now();
+      const windowStart = now;
+      const windowEnd   = now + 24 * 60 * 60 * 1000; // 24h
+      const windowLen   = windowEnd - windowStart;
+
+      // Filter active schedules that overlap with the 24h window
+      const visible = schedulesList.filter(s => {
+        if (s.status !== 'active') return false;
+        const sEnd = new Date(s.end_time).getTime();
+        const sStart = new Date(s.start_time).getTime();
+        return sEnd > windowStart && sStart < windowEnd;
+      });
+
+      if (!visible.length) {
+        bar.innerHTML = '<span style="color:#555;font-size:0.75rem;line-height:32px;padding:0 8px">No schedules in next 24h</span>';
+      } else {
+        bar.innerHTML = visible.map(s => {
+          const sStart = Math.max(new Date(s.start_time).getTime(), windowStart);
+          const sEnd   = Math.min(new Date(s.end_time).getTime(), windowEnd);
+          const left   = ((sStart - windowStart) / windowLen * 100).toFixed(2);
+          const width  = ((sEnd - sStart) / windowLen * 100).toFixed(2);
+          const isRunning = now >= new Date(s.start_time).getTime() && now < new Date(s.end_time).getTime();
+          const cls = (s.control_power_kw < 0 ? 'sched-block-charge' : 'sched-block-discharge')
+                    + (isRunning ? ' sched-block-active' : '');
+          return `<div class="sched-block ${cls}" style="left:${left}%;width:${width}%" title="#${s.id}: ${s.control_power_kw} kW\n${new Date(s.start_time).toLocaleTimeString()} → ${new Date(s.end_time).toLocaleTimeString()}">${s.control_power_kw}kW</div>`;
+        }).join('');
+      }
+
+      // Labels: now, +6h, +12h, +18h, +24h
+      const lbls = [0, 6, 12, 18, 24].map(h => {
+        const t = new Date(now + h * 3600000);
+        return h === 0 ? 'Now' : t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      });
+      labels.innerHTML = lbls.map(l => `<span>${l}</span>`).join('');
+    }
+
+    // --- HTML escape helper ---
+    function escHtml(s) {
+      const d = document.createElement('div');
+      d.appendChild(document.createTextNode(s));
+      return d.innerHTML;
+    }
+
+    // --- Initial load + auto-refresh ---
+    loadSchedules();
+    setInterval(loadSchedules, 15_000);
   </script>
 </body>
 </html>
