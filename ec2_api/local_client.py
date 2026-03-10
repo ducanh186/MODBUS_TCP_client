@@ -15,9 +15,10 @@ Usage:
 import argparse
 import json
 import logging
+import math
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -26,6 +27,17 @@ logging.basicConfig(
     format="%(asctime)s | LOCAL | %(levelname)s | %(message)s",
 )
 log = logging.getLogger("local_client")
+
+# ---------------------------------------------------------------------------
+# Schedule execution constants
+# ---------------------------------------------------------------------------
+MAX_POWER_KW = 1999.0                              # ±1999 kW clamp
+CYCLE_INTERVAL_S = 10                               # 10s per cycle
+RAMP_RATE_PCT_PER_SEC = 100 / 30                    # 3.333 %/s  (0→100% in 30s)
+MAX_DELTA_PER_CYCLE = (MAX_POWER_KW
+                       * (RAMP_RATE_PCT_PER_SEC / 100)
+                       * CYCLE_INTERVAL_S)           # ≈ 666.33 kW/cycle
+FEEDBACK_TOLERANCE_PCT = 1.0                        # 1 % dead-band
 
 # ---------------------------------------------------------------------------
 # Token manager
@@ -160,7 +172,7 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None)
     # --- PMS (base port) ---
     def _read_pms(c):
         hr = c.read_holding_registers(0, count=1, device_id=1)
-        ir = c.read_input_registers(0, count=4, device_id=1)
+        ir = c.read_input_registers(0, count=5, device_id=1)
         if hr.isError() or ir.isError():
             return None
         return {
@@ -170,6 +182,7 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None)
             "soc_avg": ir.registers[1],
             "soh_avg": ir.registers[2],
             "capacity_total": round(ir.registers[3] * SCALE, 1),
+            "alarm": ir.registers[4],
         }
     res = _read_device(port, _read_pms)
     if res:
@@ -192,7 +205,7 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None)
     # --- BMS1 (base+4), BMS2 (base+5) ---
     for offset, name in [(4, "BMS1"), (5, "BMS2")]:
         def _read_bms(c, _name=name):
-            ir = c.read_input_registers(0, count=3, device_id=1)
+            ir = c.read_input_registers(0, count=4, device_id=1)
             if ir.isError():
                 return None
             return {
@@ -200,6 +213,7 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None)
                 "soc": ir.registers[0],
                 "soh": ir.registers[1],
                 "capacity": round(ir.registers[2] * SCALE, 1),
+                "alarm": ir.registers[3],
             }
         res = _read_device(port + offset, _read_bms)
         if res:
@@ -344,6 +358,177 @@ def command_poll_loop(tm: TokenManager, api_url: str,
 
 
 # ---------------------------------------------------------------------------
+# Helpers: write kW to PMS HR0
+# ---------------------------------------------------------------------------
+def _write_pms_hr0(modbus_host: str, modbus_port: int, demand_kw: float) -> bool:
+    """Encode *demand_kw* to int16 (scale 0.1) and write PMS HR0."""
+    try:
+        from pymodbus.client import ModbusTcpClient
+    except ImportError:
+        log.warning("pymodbus not installed — cannot write to simulator")
+        return False
+
+    raw = int(round(demand_kw / 0.1))
+    if raw < 0:
+        raw = raw + 0x10000
+    raw = raw & 0xFFFF
+
+    try:
+        client = ModbusTcpClient(modbus_host, port=modbus_port)
+        if not client.connect():
+            log.error("Cannot connect to PMS %s:%d", modbus_host, modbus_port)
+            return False
+        wr = client.write_register(0, raw, device_id=1)
+        client.close()
+        if wr.isError():
+            log.error("PMS HR0 write failed: %s", wr)
+            return False
+        return True
+    except Exception as e:
+        log.error("Modbus write error: %s", e)
+        return False
+
+
+def _read_multimeter_power(rtu_bridge_url: str) -> float | None:
+    """Read active_power_kw from RTU bridge HTTP endpoint."""
+    if not rtu_bridge_url:
+        return None
+    try:
+        resp = requests.get(rtu_bridge_url, timeout=2)
+        if resp.ok:
+            return resp.json().get("active_power_kw")
+    except Exception as e:
+        log.warning("Multimeter read failed: %s", e)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Loop 3: Schedule-based execution (10s/cycle)
+#   Day 3 — basic schedule fetch + write
+#   Day 4 — ramp rate limiting
+#   Day 5 — feedback loop
+# ---------------------------------------------------------------------------
+def schedule_execution_loop(
+    tm: TokenManager,
+    api_url: str,
+    modbus_host: str = "127.0.0.1",
+    modbus_port: int = 15020,
+    rtu_bridge_url: str | None = None,
+):
+    """Fetch active schedules and execute them with ramp + feedback."""
+    api_url = api_url.rstrip("/")
+
+    # State persisted across cycles
+    current_command_kw: float = 0.0
+    is_ramping: bool = False
+
+    while True:
+        try:
+            # ── 1. Fetch active schedules ─────────────────────────────
+            resp = requests.get(
+                f"{api_url}/api/schedules/active",
+                headers=tm.headers(),
+                timeout=10,
+            )
+            if not resp.ok:
+                log.warning("Schedule fetch failed: %d", resp.status_code)
+                time.sleep(CYCLE_INTERVAL_S)
+                continue
+
+            schedules = resp.json()   # sorted by start_time ASC
+            now = datetime.now(timezone.utc)
+
+            # ── 2. Find current & next schedule ──────────────────────
+            current_schedule = None
+            next_schedule = None
+
+            for s in schedules:
+                st = datetime.fromisoformat(s["start_time"])
+                et = datetime.fromisoformat(s["end_time"])
+                if st <= now < et:
+                    current_schedule = s
+                    break
+
+            if current_schedule is not None:
+                cur_end = datetime.fromisoformat(current_schedule["end_time"])
+                for s in schedules:
+                    st = datetime.fromisoformat(s["start_time"])
+                    if st == cur_end:
+                        next_schedule = s
+                        break
+
+            # ── 3. Determine effective schedule (with pre-ramp) ──────
+            recent_schedule = current_schedule   # default
+
+            if next_schedule is not None and current_schedule is not None:
+                next_power = next_schedule["control_power_kw"] or 0.0
+                delta = abs(next_power - current_command_kw)
+                if delta > 0:
+                    ramp_cycles = math.ceil(delta / MAX_DELTA_PER_CYCLE)
+                    ramp_duration_s = ramp_cycles * CYCLE_INTERVAL_S
+                    next_start = datetime.fromisoformat(next_schedule["start_time"])
+                    ramp_start = next_start - timedelta(seconds=ramp_duration_s)
+                    if now >= ramp_start:
+                        recent_schedule = next_schedule
+                        log.info("Pre-ramping toward next schedule #%s (%.1f kW)",
+                                 next_schedule["id"], next_power)
+
+            # ── 4. Compute target ────────────────────────────────────
+            if recent_schedule is None:
+                target_kw = 0.0
+            else:
+                raw_target = recent_schedule["control_power_kw"] or 0.0
+                target_kw = max(-MAX_POWER_KW, min(MAX_POWER_KW, raw_target))
+
+            # ── 5. Apply ramp rate limiting ──────────────────────────
+            diff = target_kw - current_command_kw
+            if abs(diff) <= MAX_DELTA_PER_CYCLE:
+                new_command_kw = target_kw
+                is_ramping = False
+            else:
+                sign = 1 if diff > 0 else -1
+                new_command_kw = current_command_kw + sign * MAX_DELTA_PER_CYCLE
+                is_ramping = True
+                log.info("Ramping: %.1f → %.1f (target %.1f, delta/cycle %.1f)",
+                         current_command_kw, new_command_kw, target_kw, MAX_DELTA_PER_CYCLE)
+
+            # ── 6. Feedback loop (Day 5) ─────────────────────────────
+            #   Conditions: ramp finished  AND  target != 0
+            if (not is_ramping
+                    and recent_schedule is not None
+                    and target_kw != 0.0
+                    and rtu_bridge_url):
+                actual_kw = _read_multimeter_power(rtu_bridge_url)
+                if actual_kw is not None:
+                    error = target_kw - actual_kw
+                    tolerance = abs(target_kw) * (FEEDBACK_TOLERANCE_PCT / 100)
+                    if abs(error) > tolerance:
+                        new_command_kw = new_command_kw + error
+                        new_command_kw = max(-MAX_POWER_KW, min(MAX_POWER_KW, new_command_kw))
+                        log.info("Feedback: target=%.1f actual=%.1f error=%.1f → cmd=%.1f",
+                                 target_kw, actual_kw, error, new_command_kw)
+                    else:
+                        log.debug("Feedback OK: |error|=%.1f within %.1f%% tolerance",
+                                  abs(error), FEEDBACK_TOLERANCE_PCT)
+
+            # ── 7. Write to PMS HR0 ──────────────────────────────────
+            ok = _write_pms_hr0(modbus_host, modbus_port, new_command_kw)
+            if ok:
+                log.info("Schedule exec: wrote %.1f kW to PMS HR0 (target=%.1f, sched=%s)",
+                         new_command_kw, target_kw,
+                         recent_schedule["id"] if recent_schedule else "none")
+            else:
+                log.warning("Schedule exec: PMS HR0 write FAILED")
+
+            current_command_kw = new_command_kw
+
+        except Exception as e:
+            log.error("Schedule execution error: %s", e)
+
+        time.sleep(CYCLE_INTERVAL_S)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -383,14 +568,18 @@ def main():
         if rtu_url:
             log.info("RTU bridge: %s", rtu_url)
 
-    # Start both loops
+    # Start all loops
     t1 = threading.Thread(target=data_upload_loop, args=(tm, args.api_url, collector, args.interval), daemon=True)
     t2 = threading.Thread(target=command_poll_loop,
                           args=(tm, args.api_url, args.modbus_host, args.modbus_port, args.interval),
                           daemon=True)
+    t3 = threading.Thread(target=schedule_execution_loop,
+                          args=(tm, args.api_url, args.modbus_host, args.modbus_port, rtu_url),
+                          daemon=True)
 
     t1.start()
     t2.start()
+    t3.start()
     log.info("Local client running (interval=%ds). Press Ctrl+C to stop.", args.interval)
 
     try:
