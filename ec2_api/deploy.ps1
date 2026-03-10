@@ -85,18 +85,28 @@ function Send-SsmScript([string]$script, [int]$timeoutSec = 120) {
 # Wait for SSM command to complete -> return stdout
 function Wait-SsmCommand([string]$commandId) {
     Write-Host "  Waiting for SSM command $commandId ..." -NoNewline
+    $result = $null
     do {
         Start-Sleep -Seconds 3
         Write-Host "." -NoNewline
+        # Capture stdout only (no 2>&1) so stderr never corrupts the JSON
         $rawOutput = aws ssm get-command-invocation `
             --command-id $commandId `
             --instance-id $INSTANCE_ID `
             --region $REGION `
-            --output json 2>&1
-        # Join array of strings into single string before parsing
+            --output json
+        if ($LASTEXITCODE -ne 0) {
+            # Invocation record not yet created (race) — keep waiting
+            continue
+        }
         $jsonStr = ($rawOutput | Out-String).Trim()
-        $result = $jsonStr | ConvertFrom-Json
-    } while ($result.Status -eq "InProgress" -or $result.Status -eq "Pending")
+        try {
+            $result = $jsonStr | ConvertFrom-Json
+        } catch {
+            # Malformed output (transient) — keep waiting
+            $result = $null
+        }
+    } while ($result -eq $null -or $result.Status -eq "InProgress" -or $result.Status -eq "Pending")
     Write-Host ""
 
     if ($result.StandardOutputContent) {
