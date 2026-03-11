@@ -40,6 +40,42 @@ MAX_DELTA_PER_CYCLE = (MAX_POWER_KW
 FEEDBACK_TOLERANCE_PCT = 1.0                        # 1 % dead-band
 
 # ---------------------------------------------------------------------------
+# Alarm definitions  (Day 7)
+# ---------------------------------------------------------------------------
+ALARM_DEFS = {
+    "BMS0000": {"level": "major", "decision_time_s": 0,  "desc": "SOC >= 100% (overcharge)"},
+    "BMS0001": {"level": "minor", "decision_time_s": 30, "desc": "SOC >= 90% (high warning)"},
+    "BMS0002": {"level": "minor", "decision_time_s": 30, "desc": "SOC <= 10% (low warning)"},
+    "BMS0003": {"level": "major", "decision_time_s": 0,  "desc": "SOC <= 0% (deep discharge)"},
+    "PMS0000": {"level": "major", "decision_time_s": 0,  "desc": "BMS1 overcharge forwarded"},
+    "PMS0001": {"level": "minor", "decision_time_s": 30, "desc": "BMS1 high SOC forwarded"},
+    "PMS0002": {"level": "minor", "decision_time_s": 30, "desc": "BMS1 low SOC forwarded"},
+    "PMS0003": {"level": "major", "decision_time_s": 0,  "desc": "BMS1 deep discharge forwarded"},
+    "PMS0008": {"level": "major", "decision_time_s": 0,  "desc": "BMS2 overcharge forwarded"},
+    "PMS0009": {"level": "minor", "decision_time_s": 30, "desc": "BMS2 high SOC forwarded"},
+    "PMS0010": {"level": "minor", "decision_time_s": 30, "desc": "BMS2 low SOC forwarded"},
+    "PMS0011": {"level": "major", "decision_time_s": 0,  "desc": "BMS2 deep discharge forwarded"},
+}
+
+
+def decode_bms_alarm(alarm_u16: int) -> list[str]:
+    """Decode BMS alarm uint16 → list of alarm code strings."""
+    codes = []
+    for bit in range(4):
+        if alarm_u16 & (1 << bit):
+            codes.append(f"BMS{bit:04d}")
+    return codes
+
+
+def decode_pms_alarm(alarm_u16: int) -> list[str]:
+    """Decode PMS alarm uint16 → list of alarm code strings."""
+    codes = []
+    for bit in (0, 1, 2, 3, 8, 9, 10, 11):
+        if alarm_u16 & (1 << bit):
+            codes.append(f"PMS{bit:04d}")
+    return codes
+
+# ---------------------------------------------------------------------------
 # Token manager
 # ---------------------------------------------------------------------------
 class TokenManager:
@@ -186,6 +222,8 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None)
         }
     res = _read_device(port, _read_pms)
     if res:
+        alarm_val = res.get("alarm", 0)
+        res["occurs_alarms"] = decode_pms_alarm(alarm_val)
         devices.append(res)
 
     # --- PCS1 (base+1), PCS2 (base+2) ---
@@ -217,6 +255,8 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None)
             }
         res = _read_device(port + offset, _read_bms)
         if res:
+            alarm_val = res.get("alarm", 0)
+            res["occurs_alarms"] = decode_bms_alarm(alarm_val)
             devices.append(res)
 
     # --- Multimeter (via RTU bridge HTTP) ---
@@ -244,12 +284,23 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None)
 # ---------------------------------------------------------------------------
 # Loop 1: Upload device data (every 10s)
 # ---------------------------------------------------------------------------
-def data_upload_loop(tm: TokenManager, api_url: str, collector_fn, interval: int = 10):
+def data_upload_loop(tm: TokenManager, api_url: str, collector_fn,
+                     alarm_tracker: AlarmTracker, interval: int = 10):
     """Collect device data and POST to API every `interval` seconds."""
     api_url = api_url.rstrip("/")
     while True:
         try:
             devices = collector_fn()
+            for dev_data in devices:
+                # Add status from alarm tracker (Day 7/8)
+                dev_id = dev_data["device_id"]
+                if dev_id in ("BMS1", "BMS2", "PMS"):
+                    codes = dev_data.get("occurs_alarms", [])
+                    status = alarm_tracker.update(dev_id, codes)
+                    dev_data["status"] = status
+                else:
+                    dev_data.setdefault("status", "normal")
+                    dev_data.setdefault("occurs_alarms", [])
             for dev_data in devices:
                 resp = requests.post(
                     f"{api_url}/api/device",
@@ -408,12 +459,67 @@ def _read_multimeter_power(rtu_bridge_url: str) -> float | None:
 #   Day 4 — ramp rate limiting
 #   Day 5 — feedback loop
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Alarm tracker engine  (Day 8)
+# ---------------------------------------------------------------------------
+class AlarmTracker:
+    """Track alarm persistence per device, determine confirmed status."""
+
+    def __init__(self):
+        # device_name → {code → first_seen_time}
+        self._active: dict[str, dict[str, float]] = {}
+        # device_name → "normal" | "minor" | "major"
+        self._status: dict[str, str] = {}
+
+    def update(self, device_name: str, occurs_alarms: list[str]) -> str:
+        """Update tracker with current alarm codes, return new status."""
+        now = time.monotonic()
+        prev = self._active.setdefault(device_name, {})
+
+        # Add new, keep existing
+        current_codes = set(occurs_alarms)
+        for code in current_codes:
+            if code not in prev:
+                prev[code] = now
+
+        # Remove cleared alarms
+        for code in list(prev):
+            if code not in current_codes:
+                del prev[code]
+
+        # Determine confirmed status
+        status = "normal"
+        for code, first_seen in prev.items():
+            defn = ALARM_DEFS.get(code)
+            if defn is None:
+                continue
+            duration = now - first_seen
+            if duration >= defn["decision_time_s"]:
+                # Confirmed
+                if defn["level"] == "major":
+                    status = "major"
+                    break           # major is highest, no need to continue
+                elif defn["level"] == "minor" and status != "major":
+                    status = "minor"
+
+        self._status[device_name] = status
+        return status
+
+    def any_major(self) -> bool:
+        """Return True if any device currently has confirmed major alarm."""
+        return any(s == "major" for s in self._status.values())
+
+    def get_status(self, device_name: str) -> str:
+        return self._status.get(device_name, "normal")
+
+
 def schedule_execution_loop(
     tm: TokenManager,
     api_url: str,
     modbus_host: str = "127.0.0.1",
     modbus_port: int = 15020,
     rtu_bridge_url: str | None = None,
+    alarm_tracker: AlarmTracker | None = None,
 ):
     """Fetch active schedules and execute them with ramp + feedback."""
     api_url = api_url.rstrip("/")
@@ -421,6 +527,8 @@ def schedule_execution_loop(
     # State persisted across cycles
     current_command_kw: float = 0.0
     is_ramping: bool = False
+    if alarm_tracker is None:
+        alarm_tracker = AlarmTracker()
 
     while True:
         try:
@@ -479,6 +587,44 @@ def schedule_execution_loop(
             else:
                 raw_target = recent_schedule["control_power_kw"] or 0.0
                 target_kw = max(-MAX_POWER_KW, min(MAX_POWER_KW, raw_target))
+
+            # ── 4b. Alarm check — read alarm registers (Day 8) ─────
+            try:
+                from pymodbus.client import ModbusTcpClient as _McpCli
+                for _dev, _off, _decode in [
+                    ("BMS1", 4, decode_bms_alarm),
+                    ("BMS2", 5, decode_bms_alarm),
+                    ("PMS",  0, decode_pms_alarm),
+                ]:
+                    _alarm_addr = 3 if _dev.startswith("BMS") else 4
+                    _c = _McpCli(modbus_host, port=modbus_port + _off)
+                    if _c.connect():
+                        _rr = _c.read_input_registers(_alarm_addr, count=1, device_id=1)
+                        _c.close()
+                        if not _rr.isError():
+                            _codes = _decode(_rr.registers[0])
+                            _st = alarm_tracker.update(_dev, _codes)
+                            if _codes:
+                                log.info("Alarm %s: codes=%s status=%s", _dev, _codes, _st)
+                    else:
+                        alarm_tracker.update(_dev, [])
+            except ImportError:
+                pass
+            except Exception as _e:
+                log.warning("Alarm read error: %s", _e)
+
+            # ── 4c. Major block — force 0 if any major alarm ─────────
+            if alarm_tracker.any_major():
+                log.warning("MAJOR alarm active — forcing command to 0 kW")
+                target_kw = 0.0
+                current_command_kw = 0.0
+                new_command_kw = 0.0
+                is_ramping = False
+                ok = _write_pms_hr0(modbus_host, modbus_port, 0.0)
+                if ok:
+                    log.info("Schedule exec: wrote 0.0 kW (major block)")
+                time.sleep(CYCLE_INTERVAL_S)
+                continue
 
             # ── 5. Apply ramp rate limiting ──────────────────────────
             diff = target_kw - current_command_kw
@@ -568,13 +714,19 @@ def main():
         if rtu_url:
             log.info("RTU bridge: %s", rtu_url)
 
+    # Shared alarm tracker
+    alarm_tracker = AlarmTracker()
+
     # Start all loops
-    t1 = threading.Thread(target=data_upload_loop, args=(tm, args.api_url, collector, args.interval), daemon=True)
+    t1 = threading.Thread(target=data_upload_loop,
+                          args=(tm, args.api_url, collector, alarm_tracker, args.interval),
+                          daemon=True)
     t2 = threading.Thread(target=command_poll_loop,
                           args=(tm, args.api_url, args.modbus_host, args.modbus_port, args.interval),
                           daemon=True)
     t3 = threading.Thread(target=schedule_execution_loop,
-                          args=(tm, args.api_url, args.modbus_host, args.modbus_port, rtu_url),
+                          args=(tm, args.api_url, args.modbus_host, args.modbus_port,
+                                rtu_url, alarm_tracker),
                           daemon=True)
 
     t1.start()
