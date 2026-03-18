@@ -1,9 +1,12 @@
 """
 Local Client — Bài tập 4
 Runs on local PC alongside Modbus simulator.
-Two loops (10s interval):
-  1. Collect device data → POST /api/device
-  2. Poll pending commands → GET /api/commands → execute → PATCH executed
+Five loops:
+  1. Collect device data → POST /api/device (10s)
+  2. Poll queued commands → GET /api/commands → execute (10s)
+  3. Schedule execution with ramp + feedback (10s)
+  4. Transducer polling — read frequency from Modbus (<= 0.1s)
+  5. Frequency control loop — ichiji droop command (0.5s)
 
 Usage:
     python local_client.py --api-url http://<EC2_IP>:8000 \
@@ -12,13 +15,17 @@ Usage:
                            --modbus-host 127.0.0.1 --modbus-port 15020
 """
 
+from __future__ import annotations
+
 import argparse
+import collections
 import json
 import logging
 import math
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import requests
 
@@ -27,6 +34,13 @@ logging.basicConfig(
     format="%(asctime)s | LOCAL | %(levelname)s | %(message)s",
 )
 log = logging.getLogger("local_client")
+
+# Command lifecycle vocabulary (must match EC2 API contract)
+STATUS_EXECUTING = "executing"
+STATUS_EXECUTED = "executed"
+STATUS_FAILED = "failed"
+STATUS_BLOCKED = "blocked"
+DEFAULT_DEVICE_ID = "bess-01"
 
 # ---------------------------------------------------------------------------
 # Schedule execution constants
@@ -38,23 +52,71 @@ MAX_DELTA_PER_CYCLE = (MAX_POWER_KW
                        * (RAMP_RATE_PCT_PER_SEC / 100)
                        * CYCLE_INTERVAL_S)           # ≈ 666.33 kW/cycle
 FEEDBACK_TOLERANCE_PCT = 1.0                        # 1 % dead-band
+DEFAULT_MEASUREMENT_INTERVAL_S = 0.1
+MAX_MEASUREMENT_INTERVAL_S = 0.1
+MAX_DEADBAND_BY_BASE_FREQUENCY_HZ = {
+    50.0: 0.01,
+    60.0: 0.012,
+}
+
+
+def _get_deadband_limit_hz(base_frequency_hz: float) -> float:
+    return MAX_DEADBAND_BY_BASE_FREQUENCY_HZ.get(
+        float(base_frequency_hz),
+        MAX_DEADBAND_BY_BASE_FREQUENCY_HZ[50.0],
+    )
+
+
+def _sanitize_measurement_interval_s(interval_s: float) -> float:
+    if interval_s <= 0:
+        return DEFAULT_MEASUREMENT_INTERVAL_S
+    return min(interval_s, MAX_MEASUREMENT_INTERVAL_S)
+
+
+def _measurement_interval_from_plan(plan: Optional[dict]) -> float:
+    if not plan:
+        return DEFAULT_MEASUREMENT_INTERVAL_S
+
+    try:
+        interval_ms = float(plan.get("measurement_interval_ms", 100))
+    except (AttributeError, TypeError, ValueError):
+        return DEFAULT_MEASUREMENT_INTERVAL_S
+
+    return _sanitize_measurement_interval_s(interval_ms / 1000.0)
+
+
+class FrequencyRuntimeConfig:
+    def __init__(self, measurement_interval_s: float = DEFAULT_MEASUREMENT_INTERVAL_S):
+        self._lock = threading.Lock()
+        self._measurement_interval_s = _sanitize_measurement_interval_s(measurement_interval_s)
+
+    def set_measurement_interval_s(self, interval_s: float) -> float:
+        interval_s = _sanitize_measurement_interval_s(interval_s)
+        with self._lock:
+            self._measurement_interval_s = interval_s
+        return interval_s
+
+    def get_measurement_interval_s(self) -> float:
+        with self._lock:
+            return self._measurement_interval_s
 
 # ---------------------------------------------------------------------------
 # Alarm definitions  (Day 7)
 # ---------------------------------------------------------------------------
 ALARM_DEFS = {
-    "BMS0000": {"level": "major", "decision_time_s": 0,  "desc": "SOC >= 100% (overcharge)"},
-    "BMS0001": {"level": "minor", "decision_time_s": 30, "desc": "SOC >= 90% (high warning)"},
-    "BMS0002": {"level": "minor", "decision_time_s": 30, "desc": "SOC <= 10% (low warning)"},
-    "BMS0003": {"level": "major", "decision_time_s": 0,  "desc": "SOC <= 0% (deep discharge)"},
-    "PMS0000": {"level": "major", "decision_time_s": 0,  "desc": "BMS1 overcharge forwarded"},
-    "PMS0001": {"level": "minor", "decision_time_s": 30, "desc": "BMS1 high SOC forwarded"},
-    "PMS0002": {"level": "minor", "decision_time_s": 30, "desc": "BMS1 low SOC forwarded"},
-    "PMS0003": {"level": "major", "decision_time_s": 0,  "desc": "BMS1 deep discharge forwarded"},
-    "PMS0008": {"level": "major", "decision_time_s": 0,  "desc": "BMS2 overcharge forwarded"},
-    "PMS0009": {"level": "minor", "decision_time_s": 30, "desc": "BMS2 high SOC forwarded"},
-    "PMS0010": {"level": "minor", "decision_time_s": 30, "desc": "BMS2 low SOC forwarded"},
-    "PMS0011": {"level": "major", "decision_time_s": 0,  "desc": "BMS2 deep discharge forwarded"},
+    # block: "charge" = block negative kW, "discharge" = block positive kW
+    "BMS0000": {"level": "major", "decision_time_s": 0,  "block": "charge",    "desc": "SOC >= 100% (overcharge)"},
+    "BMS0001": {"level": "minor", "decision_time_s": 30, "block": None,         "desc": "SOC >= 90% (high warning)"},
+    "BMS0002": {"level": "minor", "decision_time_s": 30, "block": None,         "desc": "SOC <= 10% (low warning)"},
+    "BMS0003": {"level": "major", "decision_time_s": 0,  "block": "discharge", "desc": "SOC <= 0% (deep discharge)"},
+    "PMS0000": {"level": "major", "decision_time_s": 0,  "block": "charge",    "desc": "BMS1 overcharge forwarded"},
+    "PMS0001": {"level": "minor", "decision_time_s": 30, "block": None,         "desc": "BMS1 high SOC forwarded"},
+    "PMS0002": {"level": "minor", "decision_time_s": 30, "block": None,         "desc": "BMS1 low SOC forwarded"},
+    "PMS0003": {"level": "major", "decision_time_s": 0,  "block": "discharge", "desc": "BMS1 deep discharge forwarded"},
+    "PMS0008": {"level": "major", "decision_time_s": 0,  "block": "charge",    "desc": "BMS2 overcharge forwarded"},
+    "PMS0009": {"level": "minor", "decision_time_s": 30, "block": None,         "desc": "BMS2 high SOC forwarded"},
+    "PMS0010": {"level": "minor", "decision_time_s": 30, "block": None,         "desc": "BMS2 low SOC forwarded"},
+    "PMS0011": {"level": "major", "decision_time_s": 0,  "block": "discharge", "desc": "BMS2 deep discharge forwarded"},
 }
 
 
@@ -164,7 +226,8 @@ def collect_device_data_mock() -> list[dict]:
     return devices
 
 
-def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None) -> list[dict]:
+def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None,
+                               api_url: str = None) -> list[dict]:
     """
     Read actual Modbus registers from the multi-port plant simulator.
 
@@ -193,7 +256,7 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None)
 
     def _read_device(device_port, read_fn):
         """Connect to a single device port, call read_fn, then close."""
-        client = ModbusTcpClient(host, port=device_port)
+        client = ModbusTcpClient(host, port=device_port, timeout=2)
         try:
             if not client.connect():
                 log.warning("Cannot connect to %s:%d", host, device_port)
@@ -261,22 +324,49 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None)
 
     # --- Multimeter (via RTU bridge HTTP) ---
     if rtu_bridge_url:
-        try:
-            resp = requests.get(rtu_bridge_url, timeout=2)
-            if resp.ok:
-                mm_data = resp.json()
-                devices.append({
-                    "device_id": "Multimeter",
-                    "timestamp": now,
-                    "active_power": mm_data.get("active_power_kw"),
-                    "raw": mm_data.get("raw"),
-                    "comm_ok": mm_data.get("comm", {}).get("ok", False),
-                })
-                log.debug("Multimeter: %s kW", mm_data.get("active_power_kw"))
-            else:
-                log.warning("RTU bridge returned %d", resp.status_code)
-        except Exception as e:
-            log.warning("RTU bridge poll failed: %s", e)
+        # Check API toggle (skip poll if disabled)
+        mm_enabled = True
+        if api_url:
+            try:
+                sr = requests.get(f"{api_url.rstrip('/')}/api/settings/multimeter", timeout=2)
+                if sr.ok:
+                    mm_enabled = sr.json().get("enabled", True)
+            except Exception:
+                pass  # default ON if API unreachable
+        if not mm_enabled:
+            log.debug("Multimeter disabled via dashboard toggle")
+        else:
+            try:
+                resp = requests.get(rtu_bridge_url, timeout=2)
+                if resp.ok:
+                    mm_data = resp.json()
+                    devices.append({
+                        "device_id": "Multimeter",
+                        "timestamp": now,
+                        "active_power": mm_data.get("active_power_kw"),
+                        "raw": mm_data.get("raw"),
+                        "comm_ok": mm_data.get("comm", {}).get("ok", False),
+                    })
+                    log.debug("Multimeter: %s kW", mm_data.get("active_power_kw"))
+                else:
+                    log.warning("RTU bridge returned %d", resp.status_code)
+            except Exception as e:
+                log.warning("RTU bridge poll failed: %s", e)
+
+    # --- Transducer (base+6) ---
+    def _read_transducer(c):
+        ir = c.read_input_registers(0, count=1, device_id=1)
+        if ir.isError():
+            return None
+        freq_raw = ir.registers[0]
+        return {
+            "device_id": "Transducer",
+            "timestamp": now,
+            "frequency_hz": round(freq_raw * 0.001, 3),
+        }
+    res = _read_device(port + 6, _read_transducer)
+    if res:
+        devices.append(res)
 
     return devices if devices else collect_device_data_mock()
 
@@ -292,12 +382,10 @@ def data_upload_loop(tm: TokenManager, api_url: str, collector_fn,
         try:
             devices = collector_fn()
             for dev_data in devices:
-                # Add status from alarm tracker (Day 7/8)
+                # Read status from alarm tracker (updated by schedule_execution_loop)
                 dev_id = dev_data["device_id"]
                 if dev_id in ("BMS1", "BMS2", "PMS"):
-                    codes = dev_data.get("occurs_alarms", [])
-                    status = alarm_tracker.update(dev_id, codes)
-                    dev_data["status"] = status
+                    dev_data["status"] = alarm_tracker.get_status(dev_id)
                 else:
                     dev_data.setdefault("status", "normal")
                     dev_data.setdefault("occurs_alarms", [])
@@ -351,7 +439,7 @@ def _apply_command_to_modbus(modbus_host: str, modbus_port: int, cmd: dict) -> b
     raw = raw & 0xFFFF
 
     try:
-        client = ModbusTcpClient(modbus_host, port=modbus_port)
+        client = ModbusTcpClient(modbus_host, port=modbus_port, timeout=2)
         if not client.connect():
             log.error("Cannot connect to PMS %s:%d to write command", modbus_host, modbus_port)
             return False
@@ -370,37 +458,64 @@ def _apply_command_to_modbus(modbus_host: str, modbus_port: int, cmd: dict) -> b
 def command_poll_loop(tm: TokenManager, api_url: str,
                       modbus_host: str = "127.0.0.1",
                       modbus_port: int = 15020,
-                      interval: int = 10):
-    """Poll pending commands, apply to Modbus simulator, and mark as executed."""
+                      interval: int = 10,
+                      alarm_tracker: Optional["AlarmTracker"] = None,
+                      device_id: str = DEFAULT_DEVICE_ID):
+    """Poll queued commands, set executing, apply to Modbus, then set final status."""
     api_url = api_url.rstrip("/")
     while True:
         try:
             resp = requests.get(
-                f"{api_url}/api/commands?status=pending",
+                f"{api_url}/api/commands?status=queued&device_id={device_id}",
                 headers=tm.headers(),
                 timeout=10,
             )
             if resp.ok:
                 cmds = resp.json()
                 for cmd in cmds:
-                    log.info(">>> Received command #%d: %s %.1f kW",
-                             cmd["id"], cmd["command"], cmd.get("power_kw") or 0)
+                    cmd_id = cmd.get("id")
+                    cmd_ref = cmd.get("command_id") or f"id-{cmd_id}"
+                    cmd_device = cmd.get("device_id") or device_id
+                    cmd_kw = cmd.get("power_kw") or 0
+                    cmd_type = cmd.get("command", "")
+                    log.info(">>> Received %s [%s] %s %.1f kW",
+                             cmd_ref, cmd_device, cmd_type, cmd_kw)
 
-                    # Apply command to Modbus simulator (write PMS HR0)
-                    ok = _apply_command_to_modbus(modbus_host, modbus_port, cmd)
-                    status = "executed" if ok else "failed"
-
-                    # Mark as executed/failed
-                    patch_resp = requests.patch(
-                        f"{api_url}/api/commands/{cmd['id']}",
+                    # Move lifecycle queued -> executing before attempting Modbus write.
+                    begin_resp = requests.patch(
+                        f"{api_url}/api/commands/{cmd_id}",
                         headers=tm.headers(),
-                        json={"status": status},
+                        json={"status": STATUS_EXECUTING, "command_id": cmd.get("command_id"), "device_id": cmd_device},
+                        timeout=10,
+                    )
+                    if not begin_resp.ok:
+                        log.warning("    Cannot mark %s as executing: %s", cmd_ref, begin_resp.text[:140])
+                        continue
+
+                    # Directional block check
+                    blocked = alarm_tracker.get_blocked_directions() if alarm_tracker else set()
+                    if cmd_type == "charge" and "charge" in blocked:
+                        log.warning("    %s BLOCKED — charge not allowed (SOC full)", cmd_ref)
+                        status = STATUS_BLOCKED
+                    elif cmd_type == "discharge" and "discharge" in blocked:
+                        log.warning("    %s BLOCKED — discharge not allowed (SOC empty)", cmd_ref)
+                        status = STATUS_BLOCKED
+                    else:
+                        # Apply command to Modbus simulator (write PMS HR0)
+                        ok = _apply_command_to_modbus(modbus_host, modbus_port, cmd)
+                        status = STATUS_EXECUTED if ok else STATUS_FAILED
+
+                    # Mark final lifecycle status
+                    patch_resp = requests.patch(
+                        f"{api_url}/api/commands/{cmd_id}",
+                        headers=tm.headers(),
+                        json={"status": status, "command_id": cmd.get("command_id"), "device_id": cmd_device},
                         timeout=10,
                     )
                     if patch_resp.ok:
-                        log.info("    Command #%d marked %s", cmd["id"], status)
+                        log.info("    %s marked %s", cmd_ref, status)
                     else:
-                        log.warning("    Failed to ack command #%d: %s", cmd["id"], patch_resp.text[:100])
+                        log.warning("    Failed to finalize %s: %s", cmd_ref, patch_resp.text[:140])
             else:
                 log.warning("Command poll failed: %d", resp.status_code)
         except Exception as e:
@@ -425,7 +540,7 @@ def _write_pms_hr0(modbus_host: str, modbus_port: int, demand_kw: float) -> bool
     raw = raw & 0xFFFF
 
     try:
-        client = ModbusTcpClient(modbus_host, port=modbus_port)
+        client = ModbusTcpClient(modbus_host, port=modbus_port, timeout=2)
         if not client.connect():
             log.error("Cannot connect to PMS %s:%d", modbus_host, modbus_port)
             return False
@@ -440,7 +555,7 @@ def _write_pms_hr0(modbus_host: str, modbus_port: int, demand_kw: float) -> bool
         return False
 
 
-def _read_multimeter_power(rtu_bridge_url: str) -> float | None:
+def _read_multimeter_power(rtu_bridge_url: str) -> Optional[float]:
     """Read active_power_kw from RTU bridge HTTP endpoint."""
     if not rtu_bridge_url:
         return None
@@ -466,6 +581,7 @@ class AlarmTracker:
     """Track alarm persistence per device, determine confirmed status."""
 
     def __init__(self):
+        self._lock = threading.Lock()
         # device_name → {code → first_seen_time}
         self._active: dict[str, dict[str, float]] = {}
         # device_name → "normal" | "minor" | "major"
@@ -473,6 +589,10 @@ class AlarmTracker:
 
     def update(self, device_name: str, occurs_alarms: list[str]) -> str:
         """Update tracker with current alarm codes, return new status."""
+        with self._lock:
+            return self._update_locked(device_name, occurs_alarms)
+
+    def _update_locked(self, device_name: str, occurs_alarms: list[str]) -> str:
         now = time.monotonic()
         prev = self._active.setdefault(device_name, {})
 
@@ -507,10 +627,32 @@ class AlarmTracker:
 
     def any_major(self) -> bool:
         """Return True if any device currently has confirmed major alarm."""
-        return any(s == "major" for s in self._status.values())
+        with self._lock:
+            return any(s == "major" for s in self._status.values())
+
+    def get_blocked_directions(self) -> set[str]:
+        """Return set of blocked directions: {'charge'}, {'discharge'}, or both.
+
+        Only considers *confirmed* major alarms (past decision_time).
+        """
+        with self._lock:
+            blocked: set[str] = set()
+            for dev_alarms in self._active.values():
+                now = time.monotonic()
+                for code, first_seen in dev_alarms.items():
+                    defn = ALARM_DEFS.get(code)
+                    if defn is None or defn["level"] != "major":
+                        continue
+                    if now - first_seen < defn["decision_time_s"]:
+                        continue
+                    direction = defn.get("block")
+                    if direction:
+                        blocked.add(direction)
+            return blocked
 
     def get_status(self, device_name: str) -> str:
-        return self._status.get(device_name, "normal")
+        with self._lock:
+            return self._status.get(device_name, "normal")
 
 
 def schedule_execution_loop(
@@ -518,8 +660,9 @@ def schedule_execution_loop(
     api_url: str,
     modbus_host: str = "127.0.0.1",
     modbus_port: int = 15020,
-    rtu_bridge_url: str | None = None,
-    alarm_tracker: AlarmTracker | None = None,
+    rtu_bridge_url: Optional[str] = None,
+    alarm_tracker: Optional["AlarmTracker"] = None,
+    freq_mode_active: Optional[threading.Event] = None,
 ):
     """Fetch active schedules and execute them with ramp + feedback."""
     api_url = api_url.rstrip("/")
@@ -597,7 +740,7 @@ def schedule_execution_loop(
                     ("PMS",  0, decode_pms_alarm),
                 ]:
                     _alarm_addr = 3 if _dev.startswith("BMS") else 4
-                    _c = _McpCli(modbus_host, port=modbus_port + _off)
+                    _c = _McpCli(modbus_host, port=modbus_port + _off, timeout=2)
                     if _c.connect():
                         _rr = _c.read_input_registers(_alarm_addr, count=1, device_id=1)
                         _c.close()
@@ -613,18 +756,19 @@ def schedule_execution_loop(
             except Exception as _e:
                 log.warning("Alarm read error: %s", _e)
 
-            # ── 4c. Major block — force 0 if any major alarm ─────────
-            if alarm_tracker.any_major():
-                log.warning("MAJOR alarm active — forcing command to 0 kW")
-                target_kw = 0.0
-                current_command_kw = 0.0
-                new_command_kw = 0.0
-                is_ramping = False
-                ok = _write_pms_hr0(modbus_host, modbus_port, 0.0)
-                if ok:
-                    log.info("Schedule exec: wrote 0.0 kW (major block)")
-                time.sleep(CYCLE_INTERVAL_S)
-                continue
+            # ── 4c. Directional block — block harmful direction only ──
+            blocked = alarm_tracker.get_blocked_directions()
+            if blocked:
+                if target_kw < 0 and "charge" in blocked:
+                    log.warning("MAJOR alarm — charge blocked (SOC full), forcing 0 kW")
+                    target_kw = 0.0
+                elif target_kw > 0 and "discharge" in blocked:
+                    log.warning("MAJOR alarm — discharge blocked (SOC empty), forcing 0 kW")
+                    target_kw = 0.0
+                # If both directions blocked (edge: BMS1 full + BMS2 empty), force 0
+                if "charge" in blocked and "discharge" in blocked:
+                    log.warning("MAJOR alarm — both directions blocked, forcing 0 kW")
+                    target_kw = 0.0
 
             # ── 5. Apply ramp rate limiting ──────────────────────────
             diff = target_kw - current_command_kw
@@ -657,7 +801,13 @@ def schedule_execution_loop(
                         log.debug("Feedback OK: |error|=%.1f within %.1f%% tolerance",
                                   abs(error), FEEDBACK_TOLERANCE_PCT)
 
-            # ── 7. Write to PMS HR0 ──────────────────────────────────
+            # ── 7. Write to PMS HR0 (skip if frequency mode is active) ─
+            if freq_mode_active and freq_mode_active.is_set():
+                log.debug("Schedule exec: skipping PMS write — frequency mode active")
+                current_command_kw = new_command_kw
+                time.sleep(CYCLE_INTERVAL_S)
+                continue
+
             ok = _write_pms_hr0(modbus_host, modbus_port, new_command_kw)
             if ok:
                 log.info("Schedule exec: wrote %.1f kW to PMS HR0 (target=%.1f, sched=%s)",
@@ -675,6 +825,202 @@ def schedule_execution_loop(
 
 
 # ---------------------------------------------------------------------------
+# Loop 4: Transducer polling (<= 0.1s) — read frequency from Modbus
+# ---------------------------------------------------------------------------
+def transducer_poll_loop(
+    modbus_host: str,
+    transducer_port: int,
+    freq_buffer: collections.deque,
+    runtime_config: Optional[FrequencyRuntimeConfig] = None,
+):
+    """Read transducer IR0 at the configured measurement interval."""
+    try:
+        from pymodbus.client import ModbusTcpClient
+    except ImportError:
+        log.warning("pymodbus not installed — transducer polling disabled")
+        return
+
+    log_counter = 0
+
+    while True:
+        cycle_started = time.monotonic()
+        try:
+            client = ModbusTcpClient(modbus_host, port=transducer_port, timeout=2)
+            if client.connect():
+                rr = client.read_input_registers(0, count=1, device_id=1)
+                client.close()
+                if not rr.isError():
+                    freq_hz = round(rr.registers[0] * 0.001, 3)
+                    freq_buffer.append(freq_hz)
+                    log_counter += 1
+                    if log_counter % 50 == 0:  # INFO every 5s
+                        log.info("transducer_sample: %.3f Hz (buffer=%d)", freq_hz, len(freq_buffer))
+                    else:
+                        log.debug("transducer_sample: %.3f Hz", freq_hz)
+                else:
+                    log.warning("Transducer read error: %s", rr)
+            else:
+                log.warning("Cannot connect to transducer %s:%d", modbus_host, transducer_port)
+        except Exception as e:
+            log.warning("Transducer poll error: %s", e)
+        interval_s = (
+            runtime_config.get_measurement_interval_s()
+            if runtime_config is not None
+            else DEFAULT_MEASUREMENT_INTERVAL_S
+        )
+        sleep_s = max(0.0, interval_s - (time.monotonic() - cycle_started))
+        time.sleep(sleep_s)
+
+
+# ---------------------------------------------------------------------------
+# Loop 5: Frequency control (ichiji 一次調整力) — droop command every 0.5s
+# ---------------------------------------------------------------------------
+def compute_frequency_command(plan: dict, freq_samples: list, blocked_directions: set) -> dict:
+    """Compute PMS command from frequency plan and recent samples.
+
+    Returns dict with f_eff, delta_f, delta_p_kw, p_cmd_kw, abnormal_event.
+    """
+    n = min(len(freq_samples), 5)
+    f_eff = sum(freq_samples[-5:]) / n
+
+    base_f = plan["base_frequency_hz"]
+    deadband_hz = min(
+        max(float(plan.get("deadband_hz", 0.0)), 0.0),
+        _get_deadband_limit_hz(base_f),
+    )
+    delta_f = base_f - f_eff
+
+    if abs(delta_f) <= deadband_hz:
+        delta_p_signed = 0.0
+    else:
+        delta_f_eff = abs(delta_f) - deadband_hz
+        f_full = base_f * (plan["droop_percent"] / 100.0)
+        ratio = min(delta_f_eff / f_full, 1.0) if f_full > 0 else 0.0
+        delta_p_raw = ratio * plan["awarded_power_kw"]
+        # delta_f > 0 means freq below base → discharge (+kW)
+        delta_p_signed = delta_p_raw if delta_f > 0 else -delta_p_raw
+
+    p_target = plan["baseline_power_kw"] + delta_p_signed
+
+    # Directional block: if blocked, keep baseline
+    if delta_p_signed > 0 and "discharge" in blocked_directions:
+        p_target = plan["baseline_power_kw"]
+        delta_p_signed = 0.0
+    elif delta_p_signed < 0 and "charge" in blocked_directions:
+        p_target = plan["baseline_power_kw"]
+        delta_p_signed = 0.0
+
+    p_cmd = max(-MAX_POWER_KW, min(MAX_POWER_KW, p_target))
+    abnormal = f_eff <= plan.get("abnormal_frequency_hz", 49.8)
+
+    return {
+        "f_eff": round(f_eff, 3),
+        "delta_f": round(delta_f, 4),
+        "delta_p_kw": round(delta_p_signed, 1),
+        "p_cmd_kw": round(p_cmd, 1),
+        "abnormal_event": abnormal,
+        "baseline_power_kw": plan["baseline_power_kw"],
+        "deadband_hz": round(deadband_hz, 4),
+        "plan_id": plan.get("id"),
+    }
+
+
+def frequency_control_loop(
+    tm: TokenManager,
+    api_url: str,
+    modbus_host: str,
+    modbus_port: int,
+    freq_buffer: collections.deque,
+    alarm_tracker: AlarmTracker,
+    freq_mode_active: threading.Event,
+    runtime_config: Optional[FrequencyRuntimeConfig] = None,
+    device_id: str = DEFAULT_DEVICE_ID,
+    interval: float = 0.5,
+):
+    """Fetch active frequency plan and compute droop command every 0.5s."""
+    api_url = api_url.rstrip("/")
+    cached_plan = None
+    plan_fetch_time = 0.0
+
+    while True:
+        try:
+            # Re-fetch plan every 10s
+            now_mono = time.monotonic()
+            if cached_plan is None or (now_mono - plan_fetch_time) > 10.0:
+                try:
+                    resp = requests.get(
+                        f"{api_url}/api/plans/active?device_id={device_id}",
+                        timeout=5,
+                    )
+                    if resp.ok:
+                        cached_plan = resp.json()  # None if no active plan
+                    else:
+                        cached_plan = None
+                except Exception as e:
+                    log.warning("Frequency plan fetch error: %s", e)
+                plan_fetch_time = now_mono
+
+            if not cached_plan:
+                freq_mode_active.clear()
+                if runtime_config is not None:
+                    runtime_config.set_measurement_interval_s(DEFAULT_MEASUREMENT_INTERVAL_S)
+                time.sleep(interval)
+                continue
+
+            # Signal that frequency mode is active
+            freq_mode_active.set()
+            if runtime_config is not None:
+                runtime_config.set_measurement_interval_s(
+                    _measurement_interval_from_plan(cached_plan)
+                )
+
+            # Need at least 5 samples
+            if len(freq_buffer) < 5:
+                log.info("frequency_control: waiting for samples (%d/5)", len(freq_buffer))
+                time.sleep(interval)
+                continue
+
+            # Compute command
+            blocked = alarm_tracker.get_blocked_directions()
+            result = compute_frequency_command(
+                cached_plan,
+                list(freq_buffer),
+                blocked,
+            )
+
+            # Write PMS HR0
+            ok = _write_pms_hr0(modbus_host, modbus_port, result["p_cmd_kw"])
+
+            log.info(
+                "frequency_compute: f_eff=%.3f Δf=%.4f ΔP=%.1f cmd=%.1f kW abnormal=%s write=%s",
+                result["f_eff"], result["delta_f"], result["delta_p_kw"],
+                result["p_cmd_kw"], result["abnormal_event"], "OK" if ok else "FAIL",
+            )
+
+            # Upload snapshot as device_id="frequency-control"
+            try:
+                snapshot_data = {
+                    "device_id": "frequency-control",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    **result,
+                    "blocked_directions": list(blocked),
+                }
+                requests.post(
+                    f"{api_url}/api/device",
+                    headers=tm.headers(),
+                    json=snapshot_data,
+                    timeout=5,
+                )
+            except Exception as e:
+                log.debug("Frequency snapshot upload error: %s", e)
+
+        except Exception as e:
+            log.error("Frequency control error: %s", e)
+
+        time.sleep(interval)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -682,12 +1028,17 @@ def main():
     parser.add_argument("--api-url", required=True, help="EC2 API URL (http://<ip>:8000)")
     parser.add_argument("--secret-key", required=True, help="Server secret key")
     parser.add_argument("--client-key", default="local-agent-1", help="Client identifier")
+    parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID, help="Target device id for command polling")
     parser.add_argument("--modbus-host", default="127.0.0.1")
     parser.add_argument("--modbus-port", type=int, default=15020)
     parser.add_argument("--rtu-bridge", default="http://localhost:8081/api/multimeter",
                         help="RTU bridge URL for multimeter (set to empty to disable)")
     parser.add_argument("--mock", action="store_true", help="Use mock data instead of Modbus")
     parser.add_argument("--interval", type=int, default=10, help="Poll interval in seconds")
+    parser.add_argument("--transducer-port", type=int, default=15026,
+                        help="Transducer Modbus TCP port (default 15026)")
+    parser.add_argument("--no-transducer", action="store_true",
+                        help="Disable transducer polling and frequency control")
     args = parser.parse_args()
 
     tm = TokenManager(args.api_url, args.secret_key, args.client_key)
@@ -709,7 +1060,7 @@ def main():
         collector = collect_device_data_mock
         log.info("Using MOCK device data")
     else:
-        collector = lambda: collect_device_data_modbus(args.modbus_host, args.modbus_port, rtu_url)
+        collector = lambda: collect_device_data_modbus(args.modbus_host, args.modbus_port, rtu_url, args.api_url)
         log.info("Using Modbus data from %s:%d", args.modbus_host, args.modbus_port)
         if rtu_url:
             log.info("RTU bridge: %s", rtu_url)
@@ -717,22 +1068,48 @@ def main():
     # Shared alarm tracker
     alarm_tracker = AlarmTracker()
 
+    # Shared frequency state
+    freq_buffer = collections.deque(maxlen=50)  # recent transducer samples
+    freq_mode_active = threading.Event()
+    frequency_runtime_config = FrequencyRuntimeConfig()
+
     # Start all loops
     t1 = threading.Thread(target=data_upload_loop,
                           args=(tm, args.api_url, collector, alarm_tracker, args.interval),
                           daemon=True)
     t2 = threading.Thread(target=command_poll_loop,
-                          args=(tm, args.api_url, args.modbus_host, args.modbus_port, args.interval),
+                          args=(tm, args.api_url, args.modbus_host, args.modbus_port,
+                                args.interval, alarm_tracker, args.device_id),
                           daemon=True)
     t3 = threading.Thread(target=schedule_execution_loop,
                           args=(tm, args.api_url, args.modbus_host, args.modbus_port,
-                                rtu_url, alarm_tracker),
+                                rtu_url, alarm_tracker, freq_mode_active),
                           daemon=True)
 
     t1.start()
     t2.start()
     t3.start()
-    log.info("Local client running (interval=%ds). Press Ctrl+C to stop.", args.interval)
+
+    # Transducer + frequency control threads (Loop 4 & 5)
+    if not args.no_transducer:
+        t4 = threading.Thread(target=transducer_poll_loop,
+                              args=(args.modbus_host, args.transducer_port,
+                                    freq_buffer, frequency_runtime_config),
+                              daemon=True)
+        t5 = threading.Thread(target=frequency_control_loop,
+                              args=(tm, args.api_url, args.modbus_host, args.modbus_port,
+                                    freq_buffer, alarm_tracker, freq_mode_active,
+                                    frequency_runtime_config, args.device_id, 0.5),
+                              daemon=True)
+        t4.start()
+        t5.start()
+        log.info("Transducer polling (port=%d) and frequency control started.",
+                 args.transducer_port)
+    else:
+        log.info("Transducer/frequency control disabled (--no-transducer)")
+
+    log.info("Local client running (device_id=%s, interval=%ds). Press Ctrl+C to stop.",
+             args.device_id, args.interval)
 
     try:
         while True:

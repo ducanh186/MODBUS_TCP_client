@@ -7,8 +7,8 @@ Endpoints:
   POST /api/device             — receive device JSON, save to S3
   GET  /api/device             — read device_data from RDS
   POST /api/commands           — frontend creates charge/discharge command
-  GET  /api/commands           — local polls pending commands
-  PATCH /api/commands/<id>     — local marks command as executed
+  GET  /api/commands           — local polls queued commands
+  PATCH /api/commands/<id>     — local updates command lifecycle status
   POST /api/schedules          — create charge/discharge schedule
   GET  /api/schedules          — list schedules (optional ?status=)
   DELETE /api/schedules/<id>   — soft-delete (cancel) a schedule
@@ -23,6 +23,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from typing import Optional
 
 import boto3
 import jwt
@@ -120,6 +121,180 @@ def get_db():
         database=DB_NAME, user=DB_USER, password=DB_PASS,
         ssl_context=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Command contract helpers
+# ---------------------------------------------------------------------------
+COMMAND_STATUS_ORDER = (
+    "accepted",
+    "queued",
+    "executing",
+    "executed",
+    "failed",
+    "blocked",
+    "timeout",
+)
+
+COMMAND_STATUS_ALIASES = {
+    "pending": "queued",
+    "expired": "timeout",
+    "canceled": "timeout",
+    "cancelled": "timeout",
+}
+
+TERMINAL_COMMAND_STATUSES = {"executed", "failed", "blocked", "timeout"}
+
+ALLOWED_COMMAND_TRANSITIONS = {
+    "accepted": {"queued", "executing", "executed", "failed", "blocked", "timeout"},
+    "queued": {"executing", "executed", "failed", "blocked", "timeout"},
+    "executing": {"executed", "failed", "blocked", "timeout"},
+    "executed": set(),
+    "failed": set(),
+    "blocked": set(),
+    "timeout": set(),
+}
+
+DEFAULT_DEVICE_ID = "bess-01"
+_command_schema_ready = False
+
+
+def _normalize_command_status(raw_status: Optional[str]) -> str:
+    s = (raw_status or "").strip().lower()
+    if not s:
+        return ""
+    return COMMAND_STATUS_ALIASES.get(s, s)
+
+
+def _is_valid_transition(current_status: str, new_status: str) -> bool:
+    if current_status == new_status:
+        return True
+    return new_status in ALLOWED_COMMAND_TRANSITIONS.get(current_status, set())
+
+
+def _generate_command_id() -> str:
+    now = datetime.now(timezone.utc)
+    return f"cmd-{now:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
+
+
+def _ensure_command_contract_schema(conn) -> None:
+    """Best-effort schema migration so API/client can share one command vocabulary."""
+    global _command_schema_ready
+    if _command_schema_ready:
+        return
+
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT data_type, udt_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'commands' AND column_name = 'status'"
+        )
+        status_col = cur.fetchone()
+        if not status_col:
+            raise RuntimeError("commands.status column not found")
+
+        # If status is enum, convert to TEXT so lifecycle values can evolve safely.
+        if status_col[0] == "USER-DEFINED":
+            cur.execute("ALTER TABLE commands ALTER COLUMN status TYPE TEXT USING status::text")
+
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'commands' AND column_name = 'command_id'"
+        )
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE commands ADD COLUMN command_id TEXT")
+
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'commands' AND column_name = 'device_id'"
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE commands "
+                "ADD COLUMN device_id TEXT NOT NULL DEFAULT %s",
+                (DEFAULT_DEVICE_ID,),
+            )
+
+        cur.execute(
+            "UPDATE commands "
+            "SET command_id = CONCAT('cmd-', to_char(COALESCE(created_at, now()), 'YYYYMMDD-HH24MISS'), '-', LPAD(id::text, 6, '0')) "
+            "WHERE command_id IS NULL OR command_id = ''"
+        )
+        cur.execute(
+            "UPDATE commands SET device_id = %s "
+            "WHERE device_id IS NULL OR device_id = ''",
+            (DEFAULT_DEVICE_ID,),
+        )
+
+        cur.execute("ALTER TABLE commands ALTER COLUMN command_id SET NOT NULL")
+        cur.execute("ALTER TABLE commands ALTER COLUMN device_id SET DEFAULT %s", (DEFAULT_DEVICE_ID,))
+        cur.execute("ALTER TABLE commands ALTER COLUMN device_id SET NOT NULL")
+        cur.execute("ALTER TABLE commands ALTER COLUMN status SET DEFAULT 'queued'")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_commands_command_id ON commands(command_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_commands_device_status_created ON commands(device_id, status, created_at DESC)")
+
+        # Normalize legacy statuses to the unified lifecycle vocabulary.
+        cur.execute(
+            "UPDATE commands SET status = 'queued' "
+            "WHERE status::text = 'pending'"
+        )
+        cur.execute(
+            "UPDATE commands SET status = 'timeout', executed_at = COALESCE(executed_at, now()) "
+            "WHERE status::text IN ('expired', 'canceled', 'cancelled')"
+        )
+
+        conn.commit()
+        _command_schema_ready = True
+    finally:
+        cur.close()
+
+
+def _to_command_dict(row) -> dict:
+    return {
+        "id": row[0],
+        "command_id": row[1],
+        "device_id": row[2],
+        "command": row[3],
+        "power_kw": row[4],
+        "status": row[5],
+        "created_at": row[6].isoformat() if row[6] else None,
+        "executed_at": row[7].isoformat() if row[7] else None,
+        "expires_at": row[8].isoformat() if row[8] else None,
+    }
+
+
+def _parse_expire_minutes(raw_value, default_value: int) -> int:
+    try:
+        minutes = int(raw_value)
+    except (TypeError, ValueError):
+        minutes = default_value
+    return max(1, min(minutes, 24 * 60))
+
+
+def _queue_command(conn, *, command: str, power_kw: float, created_by: str,
+                   device_id: str, expire_minutes: int) -> dict:
+    cur = conn.cursor()
+    try:
+        # "Latest wins": if a new command arrives while one is still queued/executing,
+        # mark older active commands as timeout.
+        cur.execute(
+            "UPDATE commands SET status = 'timeout', executed_at = COALESCE(executed_at, now()) "
+            "WHERE device_id = %s AND status IN ('queued', 'executing') AND expires_at > now()",
+            (device_id,),
+        )
+
+        command_id = _generate_command_id()
+        cur.execute(
+            "INSERT INTO commands (command_id, device_id, command, power_kw, status, created_by, expires_at) "
+            "VALUES (%s, %s, %s, %s, 'queued', %s, now() + make_interval(mins => %s)) "
+            "RETURNING id, command_id, device_id, command, power_kw, status, created_at, executed_at, expires_at",
+            (command_id, device_id, command, power_kw, created_by, expire_minutes),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return _to_command_dict(row)
+    finally:
+        cur.close()
 
 
 # ---------------------------------------------------------------------------
@@ -293,68 +468,95 @@ def get_device_data():
 @app.route("/api/commands", methods=["POST"])
 @require_auth
 def post_command():
-    """Frontend creates a charge/discharge/standby command."""
+    """Frontend creates a command. Response status=accepted, persisted status=queued."""
     data = request.get_json(force=True)
     command = data.get("command", "").lower()
-    power_kw = data.get("power_kw")
-    expire_minutes = data.get("expire_minutes", 5)
+    try:
+        power_kw = float(data.get("power_kw") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "power_kw must be a number"}), 400
+    device_id = (data.get("device_id") or DEFAULT_DEVICE_ID).strip()
+    expire_minutes = _parse_expire_minutes(data.get("expire_minutes", 5), 5)
 
     if command not in ("charge", "discharge", "standby"):
         return jsonify({"error": "command must be charge|discharge|standby"}), 400
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+    if command == "standby":
+        power_kw = 0.0
+    else:
+        power_kw = abs(power_kw)
 
     conn = get_db()
-    cur = conn.cursor()
     try:
-        # "Latest wins": cancel any existing pending commands first
-        cur.execute(
-            "UPDATE commands SET status = 'canceled' "
-            "WHERE status = 'pending' AND expires_at > now()"
+        _ensure_command_contract_schema(conn)
+        queued = _queue_command(
+            conn,
+            command=command,
+            power_kw=power_kw,
+            created_by=request.jwt_claims.get("sub", "frontend"),
+            device_id=device_id,
+            expire_minutes=expire_minutes,
         )
-        cur.execute(
-            "INSERT INTO commands (command, power_kw, created_by, expires_at) "
-            "VALUES (%s, %s, %s, now() + make_interval(mins => %s)) "
-            "RETURNING id, created_at",
-            (command, power_kw, request.jwt_claims.get("sub", "frontend"), expire_minutes),
-        )
-        row = cur.fetchone()
-        conn.commit()
         return jsonify({
-            "id": row[0],
-            "command": command,
-            "power_kw": power_kw,
-            "created_at": row[1].isoformat() if row[1] else None,
+            "status": "accepted",
+            "command_id": queued["command_id"],
+            "device_id": queued["device_id"],
+            "command": queued["command"],
+            "power_kw": queued["power_kw"],
+            "queued_status": queued["status"],
+            "id": queued["id"],
+            "created_at": queued["created_at"],
+            "expires_at": queued["expires_at"],
         }), 201
     finally:
-        cur.close()
         conn.close()
 
 
 @app.route("/api/commands", methods=["GET"])
 @require_auth
 def get_commands():
-    """Local polls pending commands (auto-expire old ones)."""
+    """Local polls queued/executing commands. Auto-timeout old active commands."""
+    status_filter = _normalize_command_status(request.args.get("status", "queued"))
+    if not status_filter:
+        status_filter = "queued"
+
+    if status_filter not in ("queued", "executing", "all"):
+        return jsonify({"error": "status must be queued|executing|all"}), 400
+
+    device_id = (request.args.get("device_id") or DEFAULT_DEVICE_ID).strip()
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+
     conn = get_db()
     cur = conn.cursor()
     try:
-        # Expire old pending commands first
+        _ensure_command_contract_schema(conn)
+
+        # Timeout stale active commands first.
         cur.execute(
-            "UPDATE commands SET status = 'expired' "
-            "WHERE status = 'pending' AND expires_at < now()"
+            "UPDATE commands SET status = 'timeout', executed_at = COALESCE(executed_at, now()) "
+            "WHERE device_id = %s AND status IN ('accepted', 'queued', 'executing') AND expires_at < now()",
+            (device_id,),
         )
         conn.commit()
 
-        cur.execute(
-            "SELECT id, command, power_kw, status, created_at, expires_at "
-            "FROM commands WHERE status = 'pending' "
-            "ORDER BY created_at ASC"
-        )
+        if status_filter == "all":
+            cur.execute(
+                "SELECT id, command_id, device_id, command, power_kw, status, created_at, executed_at, expires_at "
+                "FROM commands WHERE device_id = %s AND status IN ('queued', 'executing') "
+                "ORDER BY created_at ASC",
+                (device_id,),
+            )
+        else:
+            cur.execute(
+                "SELECT id, command_id, device_id, command, power_kw, status, created_at, executed_at, expires_at "
+                "FROM commands WHERE device_id = %s AND status = %s "
+                "ORDER BY created_at ASC",
+                (device_id, status_filter),
+            )
         rows = cur.fetchall()
-        result = [{
-            "id": r[0], "command": r[1], "power_kw": r[2],
-            "status": r[3],
-            "created_at": r[4].isoformat() if r[4] else None,
-            "expires_at": r[5].isoformat() if r[5] else None,
-        } for r in rows]
+        result = [_to_command_dict(r) for r in rows]
         return jsonify(result)
     finally:
         cur.close()
@@ -364,26 +566,89 @@ def get_commands():
 @app.route("/api/commands/<int:cmd_id>", methods=["PATCH"])
 @require_auth
 def patch_command(cmd_id):
-    """Local marks command as executed."""
-    data = request.get_json(force=True)
-    new_status = data.get("status", "executed")
+    """Local updates command status (queued -> executing -> terminal)."""
+    global _last_command
 
-    if new_status not in ("executed", "failed"):
-        return jsonify({"error": "status must be executed|failed"}), 400
+    data = request.get_json(force=True)
+    new_status = _normalize_command_status(data.get("status", ""))
+    ack_command_id = (data.get("command_id") or "").strip()
+    ack_device_id = (data.get("device_id") or "").strip()
+
+    if new_status not in COMMAND_STATUS_ORDER:
+        return jsonify({"error": "status must be accepted|queued|executing|executed|failed|blocked|timeout"}), 400
 
     conn = get_db()
     cur = conn.cursor()
     try:
+        _ensure_command_contract_schema(conn)
         cur.execute(
-            "UPDATE commands SET status = %s, executed_at = now() "
-            "WHERE id = %s AND status = 'pending' RETURNING id",
-            (new_status, cmd_id),
+            "SELECT id, command_id, device_id, status, command, power_kw "
+            "FROM commands WHERE id = %s",
+            (cmd_id,),
         )
         row = cur.fetchone()
-        conn.commit()
         if not row:
-            return jsonify({"error": "Command not found or not pending"}), 404
-        return jsonify({"ok": True, "id": cmd_id, "status": new_status})
+            return jsonify({"error": "Command not found"}), 404
+
+        current_db_status = row[3]
+        current_status = _normalize_command_status(row[3])
+        if ack_command_id and ack_command_id != row[1]:
+            return jsonify({"error": "command_id does not match this id"}), 409
+        if ack_device_id and ack_device_id != row[2]:
+            return jsonify({"error": "device_id does not match this command"}), 409
+        if not _is_valid_transition(current_status, new_status):
+            return jsonify({
+                "error": f"invalid transition {current_status}->{new_status}",
+                "current_status": current_status,
+            }), 409
+
+        if new_status in TERMINAL_COMMAND_STATUSES:
+            cur.execute(
+                "UPDATE commands SET status = %s, executed_at = now() "
+                "WHERE id = %s AND status = %s "
+                "RETURNING id, command_id, device_id, command, power_kw, status, created_at, executed_at, expires_at",
+                (new_status, cmd_id, current_db_status),
+            )
+        else:
+            cur.execute(
+                "UPDATE commands SET status = %s "
+                "WHERE id = %s AND status = %s "
+                "RETURNING id, command_id, device_id, command, power_kw, status, created_at, executed_at, expires_at",
+                (new_status, cmd_id, current_db_status),
+            )
+        updated = cur.fetchone()
+        if not updated:
+            return jsonify({"error": "Command status changed concurrently, please retry"}), 409
+        payload = _to_command_dict(updated)
+
+        cmd = payload["command"]
+        mag = payload["power_kw"] or 0
+        if cmd == "charge":
+            signed_kw = -abs(mag)
+        elif cmd == "discharge":
+            signed_kw = abs(mag)
+        else:
+            signed_kw = 0.0
+
+        _last_command = {
+            "command_id": payload["command_id"],
+            "device_id": payload["device_id"],
+            "kw": signed_kw,
+            "raw": _encode_power_kw(signed_kw),
+            "status": payload["status"],
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "error": None,
+        }
+
+        conn.commit()
+        return jsonify({
+            "ok": True,
+            "id": payload["id"],
+            "command_id": payload["command_id"],
+            "device_id": payload["device_id"],
+            "previous_status": current_status,
+            "status": payload["status"],
+        })
     finally:
         cur.close()
         conn.close()
@@ -397,21 +662,26 @@ def patch_command(cmd_id):
 def get_command_history():
     """Get recent command history for frontend display."""
     limit = min(int(request.args.get("limit", "20")), 100)
+    device_id = (request.args.get("device_id") or "").strip()
+
     conn = get_db()
     cur = conn.cursor()
     try:
-        cur.execute(
-            "SELECT id, command, power_kw, status, created_at, executed_at, expires_at "
-            "FROM commands ORDER BY created_at DESC LIMIT %s",
-            (limit,),
-        )
+        _ensure_command_contract_schema(conn)
+        if device_id:
+            cur.execute(
+                "SELECT id, command_id, device_id, command, power_kw, status, created_at, executed_at, expires_at "
+                "FROM commands WHERE device_id = %s ORDER BY created_at DESC LIMIT %s",
+                (device_id, limit),
+            )
+        else:
+            cur.execute(
+                "SELECT id, command_id, device_id, command, power_kw, status, created_at, executed_at, expires_at "
+                "FROM commands ORDER BY created_at DESC LIMIT %s",
+                (limit,),
+            )
         rows = cur.fetchall()
-        result = [{
-            "id": r[0], "command": r[1], "power_kw": r[2], "status": r[3],
-            "created_at": r[4].isoformat() if r[4] else None,
-            "executed_at": r[5].isoformat() if r[5] else None,
-            "expires_at": r[6].isoformat() if r[6] else None,
-        } for r in rows]
+        result = [_to_command_dict(r) for r in rows]
         return jsonify(result)
     finally:
         cur.close()
@@ -422,7 +692,35 @@ def get_command_history():
 # Routes: Old UI compatibility — /api/snapshot (no auth, matches Node.js format)
 # ---------------------------------------------------------------------------
 # Server-side last_command state (survives page refresh, same as old Node server)
-_last_command = {"kw": None, "raw": None, "ts": None, "error": None}
+_last_command = {
+    "command_id": None,
+    "device_id": None,
+    "kw": None,
+    "raw": None,
+    "status": None,
+    "ts": None,
+    "error": None,
+}
+
+# In-memory multimeter toggle (default ON, resets on restart)
+_multimeter_enabled = True
+
+# File-backed toggle for cross-worker consistency (gunicorn runs 2+ workers)
+_MM_FLAG = "/tmp/bess_multimeter_enabled"
+
+
+def _mm_is_enabled() -> bool:
+    try:
+        return open(_MM_FLAG).read().strip() == "1"
+    except FileNotFoundError:
+        return True  # default ON
+
+
+def _mm_set_enabled(val: bool):
+    global _multimeter_enabled
+    _multimeter_enabled = val
+    with open(_MM_FLAG, "w") as f:
+        f.write("1" if val else "0")
 
 # Power encoding helpers (int16 × 0.1 scale, same as ModbusClient)
 POWER_SCALE = 0.1
@@ -511,6 +809,8 @@ def _build_snapshot_from_db():
             "soc_avg_meta": {"reg": "IR1", "scale": 1, "unit": "%", "fc": "FC04"},
             "soh_avg_meta": {"reg": "IR2", "scale": 1, "unit": "%", "fc": "FC04"},
             "capacity_total_meta": {"reg": "IR3", "scale": 0.1, "unit": "kWh", "fc": "FC04"},
+            "occurs_alarms": p.get("occurs_alarms", []),
+            "status": p.get("status", "normal"),
             "comm": _build_comm(pms_data["ts"]),
         }
     else:
@@ -525,6 +825,8 @@ def _build_snapshot_from_db():
             "soc_avg_meta": {"reg": "IR1", "scale": 1, "unit": "%", "fc": "FC04"},
             "soh_avg_meta": {"reg": "IR2", "scale": 1, "unit": "%", "fc": "FC04"},
             "capacity_total_meta": {"reg": "IR3", "scale": 0.1, "unit": "kWh", "fc": "FC04"},
+            "occurs_alarms": [],
+            "status": "normal",
             "comm": {"ok": False, "last_ok_ts": None, "last_error": "not polled yet"},
         }
 
@@ -565,6 +867,8 @@ def _build_snapshot_from_db():
                 "soc_meta": {"reg": "IR0", "scale": 1, "unit": "%", "fc": "FC04"},
                 "soh_meta": {"reg": "IR1", "scale": 1, "unit": "%", "fc": "FC04"},
                 "capacity_meta": {"reg": "IR2", "scale": 0.1, "unit": "kWh", "fc": "FC04"},
+                "occurs_alarms": p.get("occurs_alarms", []),
+                "status": p.get("status", "normal"),
                 "comm": _build_comm(d["ts"]),
             }
         return {
@@ -574,11 +878,20 @@ def _build_snapshot_from_db():
             "soc_meta": {"reg": "IR0", "scale": 1, "unit": "%", "fc": "FC04"},
             "soh_meta": {"reg": "IR1", "scale": 1, "unit": "%", "fc": "FC04"},
             "capacity_meta": {"reg": "IR2", "scale": 0.1, "unit": "kWh", "fc": "FC04"},
+            "occurs_alarms": [],
+            "status": "normal",
             "comm": {"ok": False, "last_ok_ts": None, "last_error": "not polled yet"},
         }
 
     # Build Multimeter
     def build_multimeter():
+        if not _mm_is_enabled():
+            return {
+                "unit_id": 10, "disabled": True,
+                "active_power_kw": None, "active_power_raw": None,
+                "active_power_meta": {"reg": "IR0", "scale": 0.1, "unit": "kW", "fc": "FC04 (RTU)"},
+                "comm": {"ok": False, "last_ok_ts": None, "last_error": "Disabled by user"},
+            }
         d = latest.get("Multimeter")
         if d:
             p = d["payload"]
@@ -598,6 +911,43 @@ def _build_snapshot_from_db():
             "comm": {"ok": False, "last_ok_ts": None, "last_error": "No RTU data received"},
         }
 
+    # Build Transducer
+    def build_transducer():
+        d = latest.get("Transducer")
+        if d:
+            p = d["payload"]
+            freq = p.get("frequency_hz")
+            return {
+                "unit_id": 1, "port": 15026,
+                "frequency_hz": freq,
+                "frequency_raw": int(round(freq / 0.001)) if freq is not None else None,
+                "frequency_meta": {"reg": "IR0", "scale": 0.001, "unit": "Hz", "fc": "FC04"},
+                "comm": _build_comm(d["ts"]),
+            }
+        return {
+            "unit_id": 1, "port": 15026,
+            "frequency_hz": None, "frequency_raw": None,
+            "frequency_meta": {"reg": "IR0", "scale": 0.001, "unit": "Hz", "fc": "FC04"},
+            "comm": {"ok": False, "last_ok_ts": None, "last_error": "not polled yet"},
+        }
+
+    # Build frequency control snapshot
+    def build_frequency_control():
+        d = latest.get("frequency-control")
+        if d:
+            p = d["payload"]
+            return {
+                "f_eff": p.get("f_eff"),
+                "delta_f": p.get("delta_f"),
+                "delta_p_kw": p.get("delta_p_kw"),
+                "p_cmd_kw": p.get("p_cmd_kw"),
+                "abnormal_event": p.get("abnormal_event", False),
+                "blocked_directions": p.get("blocked_directions", []),
+                "plan_id": p.get("plan_id"),
+                "ts": d["ts"],
+            }
+        return None
+
     return {
         "ts": now,
         "devices": {
@@ -607,7 +957,9 @@ def _build_snapshot_from_db():
             "bms1": build_bms("BMS1", 15024),
             "bms2": build_bms("BMS2", 15025),
             "multimeter": build_multimeter(),
+            "transducer": build_transducer(),
         },
+        "frequency_control": build_frequency_control(),
         "last_command": _last_command,
         "config": {
             "host": "EC2 (AWS Pipeline)",
@@ -635,16 +987,22 @@ def api_snapshot():
 def api_pms_demand():
     """Old UI compatibility — write demand via commands table.
     Accepts: { demand_control_power_kw: number }
-    Returns: { ok, written_raw, written_kw }
+    Returns: { ok, written_raw, written_kw, command_id, status, queued_status }
     """
     global _last_command
     data = request.get_json(force=True)
     kw_input = data.get("demand_control_power_kw")
+    device_id = (data.get("device_id") or DEFAULT_DEVICE_ID).strip()
 
     if kw_input is None:
         return jsonify({"ok": False, "error": "Missing demand_control_power_kw"}), 400
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id required"}), 400
 
-    kw = float(kw_input)
+    try:
+        kw = float(kw_input)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "demand_control_power_kw must be a number"}), 400
     if kw < POWER_MIN_KW or kw > POWER_MAX_KW:
         return jsonify({"ok": False, "error": f"Range: {POWER_MIN_KW} to {POWER_MAX_KW}"}), 400
 
@@ -661,30 +1019,58 @@ def api_pms_demand():
 
     try:
         conn = get_db()
-        cur = conn.cursor()
         try:
-            # "Latest wins": cancel any existing pending commands first
-            cur.execute(
-                "UPDATE commands SET status = 'canceled' "
-                "WHERE status = 'pending' AND expires_at > now()"
+            _ensure_command_contract_schema(conn)
+            queued = _queue_command(
+                conn,
+                command=cmd_type,
+                power_kw=abs(written_kw),
+                created_by="dashboard",
+                device_id=device_id,
+                expire_minutes=5,
             )
-            cur.execute(
-                "INSERT INTO commands (command, power_kw, created_by, expires_at) "
-                "VALUES (%s, %s, %s, now() + make_interval(mins => 5)) "
-                "RETURNING id",
-                (cmd_type, abs(written_kw), "dashboard"),
-            )
-            conn.commit()
         finally:
-            cur.close()
             conn.close()
 
-        _last_command = {"kw": written_kw, "raw": raw_u16, "ts": datetime.now(timezone.utc).isoformat(), "error": None}
-        return jsonify({"ok": True, "written_raw": raw_u16, "written_kw": written_kw})
+        _last_command = {
+            "command_id": queued["command_id"],
+            "device_id": queued["device_id"],
+            "kw": written_kw,
+            "raw": raw_u16,
+            "status": queued["status"],
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "error": None,
+        }
+        return jsonify({
+            "ok": True,
+            "written_raw": raw_u16,
+            "written_kw": written_kw,
+            "command_id": queued["command_id"],
+            "device_id": queued["device_id"],
+            "status": "accepted",
+            "queued_status": queued["status"],
+        })
 
     except Exception as e:
         _last_command = {**_last_command, "error": str(e), "ts": datetime.now(timezone.utc).isoformat()}
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Routes: Multimeter toggle
+# ---------------------------------------------------------------------------
+@app.route("/api/settings/multimeter", methods=["GET"])
+def api_settings_multimeter_get():
+    return jsonify({"enabled": _mm_is_enabled()})
+
+
+@app.route("/api/settings/multimeter", methods=["POST"])
+def api_settings_multimeter_post():
+    body = request.get_json(silent=True) or {}
+    enabled = bool(body.get("enabled", True))
+    _mm_set_enabled(enabled)
+    _startup_log.info("Multimeter toggle → %s", "ON" if enabled else "OFF")
+    return jsonify({"ok": True, "enabled": enabled})
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +1087,7 @@ def api_timeline():
     limit = min(int(request.args.get("limit", "300")), 2000)
 
     # Map device name to device_id in DB
-    device_map = {"pms": "PMS", "pcs1": "PCS1", "pcs2": "PCS2", "bms1": "BMS1", "bms2": "BMS2"}
+    device_map = {"pms": "PMS", "pcs1": "PCS1", "pcs2": "PCS2", "bms1": "BMS1", "bms2": "BMS2", "multimeter": "Multimeter"}
     device_id = device_map.get(device, device.upper())
 
     # Map metric name to payload JSON key
@@ -721,6 +1107,9 @@ def api_timeline():
         metric_key_map["soc_pct"] = ("soc", "%")
         metric_key_map["soh_pct"] = ("soh", "%")
         metric_key_map["capacity_kwh"] = ("capacity", "kWh")
+    # For Multimeter
+    if device_id == "Multimeter":
+        metric_key_map["active_power_kw"] = ("active_power", "kW")
 
     payload_key, unit = metric_key_map.get(metric, (metric, ""))
 
@@ -917,6 +1306,243 @@ def delete_schedule(schedule_id):
     finally:
         cur.close()
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Frequency Plans (一次調整力 ichiji)
+# ---------------------------------------------------------------------------
+MAX_DEADBAND_BY_BASE_FREQUENCY_HZ = {
+    50.0: 0.01,
+    60.0: 0.012,
+}
+MAX_MEASUREMENT_INTERVAL_MS = 100
+_freq_plans_schema_ready = False
+
+
+def _get_deadband_limit_hz(base_frequency_hz: float) -> float:
+    return MAX_DEADBAND_BY_BASE_FREQUENCY_HZ.get(
+        float(base_frequency_hz),
+        MAX_DEADBAND_BY_BASE_FREQUENCY_HZ[50.0],
+    )
+
+
+def _ensure_frequency_plans_schema(conn) -> None:
+    """Auto-create frequency_plans table if missing."""
+    global _freq_plans_schema_ready
+    if _freq_plans_schema_ready:
+        return
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS frequency_plans (
+                id SERIAL PRIMARY KEY,
+                plan_type TEXT NOT NULL DEFAULT 'FREQUENCY',
+                device_id TEXT NOT NULL DEFAULT 'bess-01',
+                enabled BOOLEAN NOT NULL DEFAULT false,
+                base_frequency_hz REAL NOT NULL DEFAULT 50.0,
+                baseline_power_kw REAL NOT NULL DEFAULT 0.0,
+                abnormal_frequency_hz REAL NOT NULL DEFAULT 49.8,
+                deadband_hz REAL NOT NULL DEFAULT 0.01,
+                droop_percent REAL NOT NULL DEFAULT 5.0,
+                awarded_power_kw REAL NOT NULL DEFAULT 300.0,
+                command_interval_ms INT NOT NULL DEFAULT 500,
+                measurement_interval_ms INT NOT NULL DEFAULT 100,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        conn.commit()
+        _freq_plans_schema_ready = True
+        _startup_log.info("frequency_plans schema ready")
+    except Exception as e:
+        conn.rollback()
+        _startup_log.warning("frequency_plans schema migration error: %s", e)
+    finally:
+        cur.close()
+
+
+@app.route("/api/plans", methods=["POST"])
+def post_plan():
+    """Create or update a frequency plan."""
+    data = request.get_json(force=True)
+
+    base_freq = float(data.get("base_frequency_hz", 50.0))
+    if base_freq not in (50.0, 60.0):
+        return jsonify({"error": "base_frequency_hz must be 50 or 60"}), 400
+
+    deadband = float(data.get("deadband_hz", 0.01))
+    deadband_limit = _get_deadband_limit_hz(base_freq)
+    if deadband <= 0 or deadband > deadband_limit:
+        return jsonify({
+            "error": (
+                f"deadband_hz must be > 0 and <= {deadband_limit:g} "
+                f"for {int(base_freq)}Hz"
+            )
+        }), 400
+
+    droop = float(data.get("droop_percent", 5.0))
+    if droop <= 0 or droop > 5:
+        return jsonify({"error": "droop_percent must be > 0 and <= 5"}), 400
+
+    awarded = float(data.get("awarded_power_kw", 300.0))
+    if awarded <= 0:
+        return jsonify({"error": "awarded_power_kw must be > 0"}), 400
+
+    device_id = (data.get("device_id") or DEFAULT_DEVICE_ID).strip()
+    enabled = bool(data.get("enabled", False))
+    baseline = float(data.get("baseline_power_kw", 0.0))
+    abnormal = float(data.get("abnormal_frequency_hz", 49.8))
+    cmd_interval = int(data.get("command_interval_ms", 500))
+    if cmd_interval <= 0:
+        return jsonify({"error": "command_interval_ms must be > 0"}), 400
+    meas_interval = int(data.get("measurement_interval_ms", 100))
+    if meas_interval <= 0 or meas_interval > MAX_MEASUREMENT_INTERVAL_MS:
+        return jsonify({
+            "error": (
+                f"measurement_interval_ms must be > 0 and <= "
+                f"{MAX_MEASUREMENT_INTERVAL_MS}"
+            )
+        }), 400
+
+    try:
+        conn = get_db()
+        try:
+            _ensure_frequency_plans_schema(conn)
+            cur = conn.cursor()
+
+            # If enabling this plan, disable all others for same device_id
+            if enabled:
+                cur.execute(
+                    "UPDATE frequency_plans SET enabled = false, updated_at = now() "
+                    "WHERE device_id = %s AND enabled = true",
+                    (device_id,),
+                )
+
+            cur.execute(
+                "INSERT INTO frequency_plans "
+                "(plan_type, device_id, enabled, base_frequency_hz, baseline_power_kw, "
+                " abnormal_frequency_hz, deadband_hz, droop_percent, awarded_power_kw, "
+                " command_interval_ms, measurement_interval_ms) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                ("FREQUENCY", device_id, enabled, base_freq, baseline,
+                 abnormal, deadband, droop, awarded, cmd_interval, meas_interval),
+            )
+            plan_id = cur.fetchone()[0]
+            conn.commit()
+            cur.close()
+        finally:
+            conn.close()
+
+        return jsonify({"ok": True, "id": plan_id, "enabled": enabled})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/plans", methods=["GET"])
+def get_plans():
+    """List all frequency plans."""
+    device_id = request.args.get("device_id", "")
+    try:
+        conn = get_db()
+        try:
+            _ensure_frequency_plans_schema(conn)
+            cur = conn.cursor()
+            if device_id:
+                cur.execute(
+                    "SELECT id, plan_type, device_id, enabled, base_frequency_hz, "
+                    "baseline_power_kw, abnormal_frequency_hz, deadband_hz, droop_percent, "
+                    "awarded_power_kw, command_interval_ms, measurement_interval_ms, "
+                    "created_at, updated_at "
+                    "FROM frequency_plans WHERE device_id = %s ORDER BY id DESC",
+                    (device_id,),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, plan_type, device_id, enabled, base_frequency_hz, "
+                    "baseline_power_kw, abnormal_frequency_hz, deadband_hz, droop_percent, "
+                    "awarded_power_kw, command_interval_ms, measurement_interval_ms, "
+                    "created_at, updated_at "
+                    "FROM frequency_plans ORDER BY id DESC"
+                )
+            rows = cur.fetchall()
+            cur.close()
+        finally:
+            conn.close()
+
+        plans = []
+        for r in rows:
+            plans.append({
+                "id": r[0], "plan_type": r[1], "device_id": r[2], "enabled": r[3],
+                "base_frequency_hz": r[4], "baseline_power_kw": r[5],
+                "abnormal_frequency_hz": r[6], "deadband_hz": r[7],
+                "droop_percent": r[8], "awarded_power_kw": r[9],
+                "command_interval_ms": r[10], "measurement_interval_ms": r[11],
+                "created_at": r[12].isoformat() if r[12] else None,
+                "updated_at": r[13].isoformat() if r[13] else None,
+            })
+        return jsonify(plans)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/plans/active", methods=["GET"])
+def get_active_plan():
+    """Get the active (enabled) frequency plan for a device."""
+    device_id = request.args.get("device_id", DEFAULT_DEVICE_ID)
+    try:
+        conn = get_db()
+        try:
+            _ensure_frequency_plans_schema(conn)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, plan_type, device_id, enabled, base_frequency_hz, "
+                "baseline_power_kw, abnormal_frequency_hz, deadband_hz, droop_percent, "
+                "awarded_power_kw, command_interval_ms, measurement_interval_ms, "
+                "created_at, updated_at "
+                "FROM frequency_plans WHERE device_id = %s AND enabled = true "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (device_id,),
+            )
+            r = cur.fetchone()
+            cur.close()
+        finally:
+            conn.close()
+
+        if not r:
+            return jsonify(None)
+
+        return jsonify({
+            "id": r[0], "plan_type": r[1], "device_id": r[2], "enabled": r[3],
+            "base_frequency_hz": r[4], "baseline_power_kw": r[5],
+            "abnormal_frequency_hz": r[6], "deadband_hz": r[7],
+            "droop_percent": r[8], "awarded_power_kw": r[9],
+            "command_interval_ms": r[10], "measurement_interval_ms": r[11],
+            "created_at": r[12].isoformat() if r[12] else None,
+            "updated_at": r[13].isoformat() if r[13] else None,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/plans/<int:plan_id>", methods=["DELETE"])
+def delete_plan(plan_id):
+    """Disable a frequency plan."""
+    try:
+        conn = get_db()
+        try:
+            _ensure_frequency_plans_schema(conn)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE frequency_plans SET enabled = false, updated_at = now() WHERE id = %s",
+                (plan_id,),
+            )
+            conn.commit()
+            cur.close()
+        finally:
+            conn.close()
+        return jsonify({"ok": True, "id": plan_id, "enabled": False})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------
