@@ -252,7 +252,14 @@ systemctl restart $SERVICE
 
 echo "==> Waiting for service..."
 sleep 3
-systemctl is-active $SERVICE
+if ! systemctl is-active --quiet $SERVICE; then
+  systemctl is-active $SERVICE || true
+  echo "==> systemctl status ($SERVICE)"
+  systemctl status $SERVICE --no-pager -l || true
+  echo "==> journalctl tail ($SERVICE)"
+  journalctl -u $SERVICE --no-pager -n 80 -o short-plain || true
+  exit 3
+fi
 echo "Install OK"
 "@
 

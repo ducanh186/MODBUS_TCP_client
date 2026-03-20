@@ -2,12 +2,6 @@
 *.md
 !README.md
 
-# Docker postgres secrets
-web_dashboard/docker/postgres/.env
-
-# Web dashboard env (DB credentials)
-web_dashboard/.env
-
 # EC2 API secrets (local dev only — production uses SSM)
 ec2_api/.env
 

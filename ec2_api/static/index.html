@@ -7,185 +7,225 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-      background: #1a1a2e;
-      color: #eee;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
       padding: 20px;
+      line-height: 1.5;
+      display: flex; flex-direction: column; align-items: center;
     }
-    h1 { text-align: center; margin-bottom: 4px; font-size: 1.4rem; color: #00d4ff; }
-    .subtitle { text-align: center; font-size: 0.82rem; color: #888; margin-bottom: 16px; }
+    body > * { width: 100%; max-width: 1200px; margin-left: auto; margin-right: auto; }
+    h1 { text-align: center; margin-bottom: 4px; font-size: 1.75rem; color: #f8fafc; font-weight: 600; letter-spacing: -0.025em; }
+    .subtitle { text-align: center; font-size: 0.9rem; color: #94a3b8; margin-bottom: 24px; }
 
     /* ---- Summary cards ---- */
     .cards {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 12px;
-      max-width: 1000px;
-      margin: 0 auto 18px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      max-width: 1200px;
+      margin: 0 auto 24px;
     }
     .card {
-      background: #16213e;
-      border-radius: 8px;
-      padding: 14px 16px;
-      border-left: 4px solid #00d4ff;
+      background: #1e293b;
+      border-radius: 12px;
+      padding: 20px;
+      border: 1px solid #334155;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      position: relative;
+      overflow: hidden;
     }
-    .card.warn  { border-left-color: #ffaa00; }
-    .card.error { border-left-color: #f44; }
-    .card-label { font-size: 0.72rem; text-transform: uppercase; color: #888; margin-bottom: 4px; letter-spacing: 0.5px; }
-    .card-value { font-size: 1.3rem; font-weight: 700; color: #fff; }
-    .card-sub   { font-size: 0.72rem; color: #666; margin-top: 3px; }
+    .card::before {
+      content: "";
+      position: absolute;
+      top: 0; left: 0; bottom: 0; width: 4px;
+      background: #38bdf8;
+    }
+    .card.warn::before  { background: #fbbf24; }
+    .card.error::before { background: #f87171; }
+    .card-label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; color: #94a3b8; margin-bottom: 8px; letter-spacing: 0.05em; display:flex; justify-content:space-between; align-items:center; }
+    .card-value { font-size: 1.75rem; font-weight: 700; color: #f8fafc; margin-bottom: 4px; }
+    .card-sub   { font-size: 0.8rem; color: #64748b; }
 
     /* ---- Device table ---- */
     table {
       width: 100%;
-      max-width: 1060px;
+      max-width: 1200px;
+      margin: 0 auto 32px;
+      border-collapse: separate;
+      border-spacing: 0;
+      background: #1e293b;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid #334155;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+    th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #334155; }
+    th { background: #0f172a; color: #94a3b8; font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    td { font-size: 0.9rem; color: #e2e8f0; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #334155; }
+    td[title] { cursor: help; text-decoration: underline dotted #64748b; text-underline-offset: 4px; }
+    .comm-ok    { color: #34d399; font-weight: 600; }
+    .comm-stale { color: #fbbf24; font-weight: 600; }
+    .comm-down  { color: #f87171; font-weight: 600; }
+    .na { text-align:center; color: #64748b; font-style: italic; }
+    .mismatch-ok   { color: #34d399; }
+    .mismatch-warn { color: #fbbf24; font-weight: 600; }
+    .mismatch-bad  { color: #f87171; font-weight: 600; }
+
+    /* ---- Control panel & other sections ---- */
+    .control, .timeline-section, .freq-section, .schedule-section, .alarm-panel {
+      max-width: 1200px;  width: 100%;
       margin: 0 auto 24px;
-      border-collapse: collapse;
+      background: #1e293b;
+      border-radius: 12px;
+      padding: 24px;
+      border: 1px solid #334155;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
     }
-    th, td { padding: 7px 10px; text-align: center; border: 1px solid #333; }
-    th { background: #16213e; color: #00d4ff; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; }
-    td { font-size: 0.88rem; }
-    tr:nth-child(even) { background: rgba(255,255,255,0.03); }
-    tr:hover { background: rgba(0,212,255,0.08); }
-
-    /* Tooltip cells */
-    td[title] { cursor: help; text-decoration-style: dotted; }
-
-    .comm-ok    { color: #0f6; font-weight: 700; }
-    .comm-stale { color: #ffaa00; font-weight: 700; }
-    .comm-down  { color: #f44; font-weight: 700; }
-    .na { color: #555; }
-    .mismatch-ok   { color: #0f6; }
-    .mismatch-warn { color: #ffaa00; font-weight: 600; }
-    .mismatch-bad  { color: #f44; font-weight: 700; }
-
-    /* ---- Control panel ---- */
-    .control {
-      max-width: 520px;
-      margin: 0 auto;
-      background: #16213e;
-      border-radius: 8px;
-      padding: 18px 24px;
+    .control h2, .timeline-section h2, .freq-section h2, .schedule-section h2, .alarm-panel h2 { 
+      font-size: 1.125rem; font-weight: 600; color: #f8fafc; margin-bottom: 16px; border-bottom: 1px solid #334155; padding-bottom: 12px; 
     }
-    .control h2 { font-size: 1rem; margin-bottom: 4px; color: #00d4ff; }
-    .convention { font-size: 0.75rem; color: #aaa; margin-bottom: 12px; }
-    .convention b { color: #0f6; }
-    .convention .dis { color: #ff6b35; }
-    .control-row { display: flex; gap: 8px; align-items: center; }
-    .control-row input {
-      flex: 1; padding: 8px 12px;
-      border: 1px solid #444; border-radius: 4px;
-      background: #0f3460; color: #eee; font-size: 0.95rem;
+    .convention { font-size: 0.85rem; color: #94a3b8; margin-bottom: 16px; background: #0f172a; padding: 12px; border-radius: 8px; border: 1px solid #334155; }
+    .convention b { color: #34d399; }
+    .convention .dis { color: #fbbf24; font-weight: 600;}
+    
+    .control-row { display: flex; gap: 12px; align-items: center; max-width: 600px;  }
+    .control-row input, .timeline-controls select, .timeline-controls input, .freq-form select, .freq-form input, .sched-form input {
+      padding: 10px 14px;
+      border: 1px solid #475569; border-radius: 6px;
+      background: #0f172a; color: #f8fafc; font-size: 0.95rem;
+      transition: all 0.2s;
     }
-    .control-row input:focus { outline: none; border-color: #00d4ff; }
-    .control-row input:invalid { border-color: #f44; }
-    .btn { padding: 8px 16px; border: none; border-radius: 4px; font-weight: 700; cursor: pointer; font-size: 0.85rem; }
-    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .btn-send { background: #00d4ff; color: #1a1a2e; }
-    .btn-send:hover:not(:disabled) { background: #00b8d9; }
-    .btn-stop { background: #f44; color: #fff; }
-    .btn-stop:hover:not(:disabled) { background: #d32f2f; }
+    .control-row input { flex: 1; }
+    .control-row input:focus, .timeline-controls select:focus, .timeline-controls input:focus, .freq-form select:focus, .freq-form input:focus, .sched-form input:focus { 
+      outline: none; border-color: #38bdf8; box-shadow: 0 0 0 1px #38bdf8; 
+    }
+    .control-row input:invalid, .sched-form input:invalid { border-color: #f87171; box-shadow: 0 0 0 1px #f87171;}
 
-    .range-hint { font-size: 0.72rem; color: #666; margin-top: 4px; }
+    .btn { padding: 10px 20px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 0.9rem; transition: background 0.2s; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-send, .btn-add { background: #0284c7; color: #ffffff; }
+    .btn-send:hover:not(:disabled), .btn-add:hover:not(:disabled) { background: #0369a1; }
+    .btn-stop { background: #e11d48; color: #ffffff; }
+    .btn-stop:hover:not(:disabled) { background: #be123c; }
+    .btn-del { background: #ef4444; color: #fff; border: none; border-radius: 4px; padding: 4px 8px; cursor: pointer; font-size: 0.75rem; font-weight: 600; }
+    .btn-del:hover { background: #dc2626; }
+    .range-hint { font-size: 0.8rem; color: #64748b; margin-top: 8px; }
 
     /* Presets */
-    .presets { display: flex; gap: 5px; margin-top: 10px; flex-wrap: wrap; }
+    .presets { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
     .presets button {
-      padding: 4px 10px; border: 1px solid #444; border-radius: 4px;
-      background: transparent; font-size: 0.75rem; cursor: pointer;
+      padding: 6px 12px; border: 1px solid #475569; border-radius: 6px;
+      background: #0f172a; font-size: 0.8rem; cursor: pointer; color: #e2e8f0; font-weight:500;
+      transition: all 0.2s;
     }
-    .presets button:hover { border-color: #00d4ff; }
-    .preset-charge { color: #0f6; border-color: #0a5; }
-    .preset-charge:hover { border-color: #0f6 !important; }
-    .preset-discharge { color: #ff6b35; border-color: #b34a20; }
-    .preset-discharge:hover { border-color: #ff6b35 !important; }
-    .preset-zero { color: #aaa; }
+    .presets button:hover { background: #334155; border-color: #94a3b8; }
+    .preset-charge { color: #34d399 !important; border-color: rgba(52, 211, 153, 0.4) !important; }
+    .preset-charge:hover { border-color: #34d399 !important; background: rgba(52, 211, 153, 0.1) !important; }
+    .preset-discharge { color: #fbbf24 !important; border-color: rgba(251, 191, 36, 0.4) !important; }
+    .preset-discharge:hover { border-color: #fbbf24 !important; background: rgba(251, 191, 36, 0.1) !important; }
+    .preset-zero { color: #94a3b8 !important; }
 
-    .result { margin-top: 10px; font-size: 0.8rem; min-height: 18px; }
-    .result.ok  { color: #0f6; }
-    .result.err { color: #f44; }
+    .result, .sched-result { margin-top: 16px; font-size: 0.9rem; min-height: 20px; font-weight: 500; }
+    .result.ok, .sched-result.ok { color: #34d399; }
+    .result.err, .sched-result.err { color: #f87171; }
 
-    /* ---- Timeline section ---- */
-    .timeline-section {
-      max-width: 1060px;
-      margin: 24px auto 0;
-      background: #16213e;
-      border-radius: 8px;
-      padding: 18px 24px;
-    }
-    .timeline-section h2 { font-size: 1rem; color: #00d4ff; margin-bottom: 12px; }
-    .timeline-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
-    .timeline-controls select, .timeline-controls input[type=number] {
-      padding: 6px 10px; border: 1px solid #444; border-radius: 4px;
-      background: #0f3460; color: #eee; font-size: 0.85rem;
-    }
-    .timeline-controls select:focus, .timeline-controls input:focus { outline: none; border-color: #00d4ff; }
-    .timeline-status { font-size: 0.75rem; color: #888; margin-bottom: 8px; min-height: 16px; }
-    .timeline-table-wrap { overflow-x: auto; max-height: 320px; overflow-y: auto; }
-    .timeline-table-wrap table { margin: 0; }
-    .timeline-table-wrap th { position: sticky; top: 0; z-index: 1; }
-    .comm-ok-badge  { color: #0f6; font-size: 0.75rem; }
-    .comm-err-badge { color: #f44; font-size: 0.75rem; }
+    /* ---- Timeline section & others ---- */
+    .timeline-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
+    .timeline-controls label { font-size: 0.85rem; color: #94a3b8; font-weight: 500;}
+    .timeline-status { font-size: 0.85rem; color: #94a3b8; margin-bottom: 12px; min-height: 20px; }
+    .timeline-table-wrap, .sched-table-wrap { overflow-x: auto; max-height: 400px; overflow-y: auto; border: 1px solid #334155; border-radius: 8px; }
+    .timeline-table-wrap table, .sched-table-wrap table, .freq-plans-table table { margin: 0; border: none; box-shadow: none; border-radius:0; max-width: none;}
+    .timeline-table-wrap th, .sched-table-wrap th { position: sticky; top: 0; z-index: 10; background: #0f172a; border-bottom: 2px solid #334155; }
+    
+    .comm-ok-badge  { display:inline-block; padding: 2px 6px; background: rgba(52,211,153,0.1); color: #34d399; border-radius: 4px; font-size: 0.75rem; font-weight:600;}
+    .comm-err-badge { display:inline-block; padding: 2px 6px; background: rgba(248,113,113,0.1); color: #f87171; border-radius: 4px; font-size: 0.75rem; font-weight:600;}
 
-    /* ---- Schedule Manager ---- */
-    .schedule-section {
-      max-width: 1060px;
-      margin: 24px auto 0;
-      background: #16213e;
-      border-radius: 8px;
-      padding: 18px 24px;
-    }
-    .schedule-section h2 { font-size: 1rem; color: #00d4ff; margin-bottom: 12px; }
-    .sched-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 14px; }
-    .sched-form .field { display: flex; flex-direction: column; gap: 3px; }
-    .sched-form .field label { font-size: 0.72rem; color: #aaa; text-transform: uppercase; letter-spacing: 0.4px; }
-    .sched-form input[type="datetime-local"],
-    .sched-form input[type="number"] {
-      padding: 7px 10px; border: 1px solid #444; border-radius: 4px;
-      background: #0f3460; color: #eee; font-size: 0.85rem;
-    }
-    .sched-form input:focus { outline: none; border-color: #00d4ff; }
-    .sched-form input:invalid { border-color: #f44; }
-    .btn-add { background: #00d4ff; color: #1a1a2e; padding: 8px 16px; border: none; border-radius: 4px; font-weight: 700; cursor: pointer; font-size: 0.85rem; align-self: flex-end; }
-    .btn-add:hover { background: #00b8d9; }
-    .btn-add:disabled { opacity: 0.4; cursor: not-allowed; }
-    .sched-result { font-size: 0.8rem; min-height: 18px; margin-bottom: 10px; }
-    .sched-result.ok  { color: #0f6; }
-    .sched-result.err { color: #f44; }
+    /* ---- Frequent Plan (Ichiji) ---- */
+    .freq-type-selector { display: flex; gap: 16px; margin-bottom: 20px; background: #0f172a; padding: 12px; border-radius: 8px; border: 1px solid #334155; }
+    .freq-type-selector label { cursor: pointer; font-size: 0.9rem; display: flex; align-items: center; gap: 8px; font-weight: 500; color: #e2e8f0; }
+    .freq-type-selector input[type="radio"] { accent-color: #38bdf8; width: 16px; height: 16px; }
+    
+    .freq-form { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 24px; }
+    .freq-form .field { display: flex; flex-direction: column; gap: 6px; }
+    .freq-form .field label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; font-weight: 600; letter-spacing: 0.05em; }
+    .freq-form select, .freq-form input[type="number"] { width: 140px; }
+    .freq-form .checkbox-field { display: flex; align-items: center; gap: 8px; padding-top: 24px; font-size: 0.9rem; font-weight: 500;}
+    .freq-form .checkbox-field input[type="checkbox"] { accent-color: #38bdf8; width: 18px; height: 18px; cursor:pointer;}
 
-    .sched-table-wrap { overflow-x: auto; max-height: 360px; overflow-y: auto; }
-    .sched-table-wrap table { margin: 0; }
-    .sched-table-wrap th { position: sticky; top: 0; z-index: 1; }
-    .sched-row-active { background: rgba(0, 212, 255, 0.12) !important; border-left: 3px solid #00d4ff; }
-    .sched-charge { color: #0f6; font-weight: 600; }
-    .sched-discharge { color: #ff6b35; font-weight: 600; }
-    .sched-status-active { color: #0f6; }
-    .sched-status-canceled { color: #888; }
-    .sched-status-expired { color: #ffaa00; }
-    .sched-status-running { color: #00d4ff; font-weight: 700; }
-    .btn-del { background: #f44; color: #fff; border: none; border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 0.75rem; font-weight: 600; }
-    .btn-del:hover { background: #d32f2f; }
+    .freq-monitor { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-top: 24px; }
+    .freq-monitor .fm-item { background: #0f172a; border-radius: 8px; padding: 16px; text-align: center; border: 1px solid #334155; }
+    .fm-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; font-weight: 600; letter-spacing: 0.05em; }
+    .fm-value { font-size: 1.5rem; font-weight: 700; color: #f8fafc; margin-top: 8px; }
+    .fm-value.warn { color: #fbbf24; }
+    .fm-value.alarm { color: #f87171; }
+    .fm-value.ok { color: #34d399; }
+    .freq-plans-table { margin-top: 24px; border: 1px solid #334155; border-radius: 8px; overflow:hidden;}
 
-    /* Timeline bar */
-    .sched-timeline { margin-top: 14px; }
-    .sched-timeline h3 { font-size: 0.85rem; color: #aaa; margin-bottom: 6px; }
-    .sched-timeline-bar {
-      position: relative; height: 32px; background: #0f3460; border-radius: 4px; overflow: hidden;
-    }
-    .sched-timeline-bar .sched-block {
-      position: absolute; top: 2px; height: 28px; border-radius: 3px; opacity: 0.85;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 0.65rem; color: #fff; font-weight: 600; min-width: 2px;
-      cursor: default; overflow: hidden; white-space: nowrap;
-    }
-    .sched-block-charge { background: #0a5; }
-    .sched-block-discharge { background: #b34a20; }
-    .sched-block-active { border: 2px solid #00d4ff; opacity: 1; }
-    .sched-timeline-labels {
-      display: flex; justify-content: space-between;
-      font-size: 0.65rem; color: #666; margin-top: 2px;
-    }
-  </style>
+    /* ---- Schedule Manager & Status Badges ---- */
+    .sched-form { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 24px; }
+    .sched-form .field { display: flex; flex-direction: column; gap: 6px; }
+    .sched-form .field label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; font-weight: 600; letter-spacing: 0.05em; }
+    
+    .sched-row-active { background: rgba(56, 189, 248, 0.08) !important; border-left: 3px solid #38bdf8; }
+    .sched-charge { color: #34d399; font-weight: 600; }
+    .sched-discharge { color: #fbbf24; font-weight: 600; }
+    
+    .sched-status-active { color: #34d399; font-weight: 600;}
+    .sched-status-canceled { color: #64748b; }
+    .sched-status-expired { color: #94a3b8; }
+    .sched-status-running { color: #38bdf8; font-weight: 700; display:flex; align-items:center; gap:6px; }
+    .sched-status-running::before { content:''; display:inline-block; width:8px; height:8px; background:#38bdf8; border-radius:50%; box-shadow: 0 0 8px #38bdf8; animation: flasher 1.5s infinite; }
+    @keyframes flasher { 0% { opacity:1; } 50% { opacity:0.3; } 100% { opacity:1; } }
+
+    .sched-timeline { margin-top: 24px; }
+    .sched-timeline h3 { font-size: 0.9rem; color: #94a3b8; margin-bottom: 12px; font-weight: 600;}
+    .sched-timeline-bar { position: relative; height: 36px; background: #0f172a; border-radius: 6px; overflow: hidden; border: 1px solid #334155; }
+    .sched-timeline-bar .sched-block { position: absolute; top: 3px; height: 28px; border-radius: 4px; opacity: 0.9; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; color: #fff; font-weight: 600; min-width: 2px; cursor: default; overflow: hidden; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,0.2); transition: opacity 0.2s; }
+    .sched-timeline-bar .sched-block:hover { opacity: 1; z-index:10; }
+    .sched-block-charge { background: #059669; }
+    .sched-block-discharge { background: #d97706; }
+    .sched-block-active { border: 2px solid #fff; opacity: 1; box-shadow: 0 0 8px rgba(56,189,248,0.5); }
+    .sched-timeline-labels { display: flex; justify-content: space-between; font-size: 0.75rem; color: #64748b; margin-top: 6px; }
+
+    /* Badges */
+    .status-badge { display: inline-flex; align-items:center; font-size: 0.65rem; font-weight: 700; padding: 2px 8px; border-radius: 12px; margin-left: 8px; letter-spacing: 0.05em; text-transform: uppercase; }
+    .status-normal { background: rgba(52, 211, 153, 0.15); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.3); }
+    .status-minor  { background: rgba(251, 191, 36, 0.15); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.3); }
+    .status-major  { background: rgba(248, 113, 113, 0.15); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.3); animation: pulse-major 1.5s infinite; }
+    @keyframes pulse-major { 0%,100%{box-shadow: 0 0 0 0 rgba(248,113,113,0.5);} 50%{box-shadow: 0 0 0 6px rgba(248,113,113,0);} }
+
+    .cmd-status { font-weight: 600; padding: 2px 6px; border-radius:4px; font-size: 0.8rem; }
+    .cmd-status-accepted { background: rgba(148,163,184,0.1); color: #94a3b8; }
+    .cmd-status-queued { background: rgba(56,189,248,0.1); color: #38bdf8; }
+    .cmd-status-executing { background: rgba(251,191,36,0.1); color: #fbbf24; }
+    .cmd-status-executed { background: rgba(52,211,153,0.1); color: #34d399; }
+    .cmd-status-failed { background: rgba(248,113,113,0.1); color: #f87171; }
+    .cmd-status-blocked { background: rgba(249,115,22,0.1); color: #f97316; }
+    .cmd-status-timeout { background: rgba(167,139,250,0.1); color: #a855f7; }
+
+    /* Alarms */
+    .alarm-panel .alarm-none { color: #64748b; font-size: 0.9rem; font-style: italic; }
+    .alarm-list { display: flex; flex-wrap: wrap; gap: 8px; }
+    .alarm-chip { font-size: 0.75rem; padding: 4px 12px; border-radius: 16px; font-weight: 600; display:flex; align-items:center; gap:6px; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+    .alarm-chip::before { content:' '; display:block; width:6px; height:6px; border-radius:50%; }
+    .alarm-chip-major { background: rgba(248, 113, 113, 0.1); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.3); }
+    .alarm-chip-major::before { background: #f87171; }
+    .alarm-chip-minor { background: rgba(251, 191, 36, 0.1); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.3); }
+    .alarm-chip-minor::before { background: #fbbf24; }
+
+    /* Toggle switch */
+    .toggle-wrap { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+    .toggle-wrap label { font-size: 0.75rem; color: #94a3b8; cursor: pointer; user-select: none; font-weight: 500;}
+    .toggle-switch { position: relative; width: 36px; height: 20px; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; cursor: pointer; inset: 0; background: #475569; border-radius: 20px; transition: .3s; }
+    .toggle-slider::before { content: ""; position: absolute; height: 16px; width: 16px; left: 2px; bottom: 2px; background: #fff; border-radius: 50%; transition: .3s; box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+    .toggle-switch input:checked + .toggle-slider { background: #0ea5e9; }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(16px); }
+</style>
 </head>
 <body>
 
@@ -200,7 +240,7 @@
       <div class="card-sub" id="cardConnSub">--</div>
     </div>
     <div class="card" id="cardPower">
-      <div class="card-label">Total Active Power</div>
+      <div class="card-label">Total Active Power <span id="cardPMSStatus"></span></div>
       <div class="card-value" id="cardPowerVal">-- kW</div>
       <div class="card-sub" id="cardPowerSub">PMS aggregate</div>
     </div>
@@ -215,7 +255,11 @@
       <div class="card-sub" id="cardCmdSub">No command sent yet</div>
     </div>
     <div class="card" id="cardMM">
-      <div class="card-label">Multimeter (RTU)</div>
+      <div class="card-label">Multimeter (RTU)
+        <span class="toggle-wrap" style="display:inline-flex; margin-left:8px;">
+          <span class="toggle-switch"><input type="checkbox" id="mmToggle" checked onchange="toggleMultimeter(this.checked)"><span class="toggle-slider"></span></span>
+        </span>
+      </div>
       <div class="card-value" id="cardMMVal">-- kW</div>
       <div class="card-sub" id="cardMMSub">Point of connection</div>
     </div>
@@ -237,16 +281,24 @@
     </div>
     <!-- BMS1 card -->
     <div class="card" id="cardBMS1">
-      <div class="card-label">BMS1 &nbsp;<span id="cardBMS1Comm" class="comm-down" style="font-size:0.65rem;">--</span></div>
+      <div class="card-label">BMS1 &nbsp;<span id="cardBMS1Comm" class="comm-down" style="font-size:0.65rem;">--</span><span id="cardBMS1Status"></span></div>
       <div class="card-value" id="cardBMS1SOC">-- %</div>
       <div class="card-sub">Port 15024 | SOC / <span id="cardBMS1Cap">-- kWh</span></div>
+      <div class="card-sub" id="cardBMS1Alarms" style="margin-top:2px"></div>
     </div>
     <!-- BMS2 card -->
     <div class="card" id="cardBMS2">
-      <div class="card-label">BMS2 &nbsp;<span id="cardBMS2Comm" class="comm-down" style="font-size:0.65rem;">--</span></div>
+      <div class="card-label">BMS2 &nbsp;<span id="cardBMS2Comm" class="comm-down" style="font-size:0.65rem;">--</span><span id="cardBMS2Status"></span></div>
       <div class="card-value" id="cardBMS2SOC">-- %</div>
       <div class="card-sub">Port 15025 | SOC / <span id="cardBMS2Cap">-- kWh</span></div>
+      <div class="card-sub" id="cardBMS2Alarms" style="margin-top:2px"></div>
     </div>
+  </div>
+
+  <!-- Alarm panel -->
+  <div class="alarm-panel" id="alarmPanel">
+    <h2>Active Alarms</h2>
+    <div id="alarmPanelBody" class="alarm-none">No alarms</div>
   </div>
 
   <!-- Device table -->
@@ -282,6 +334,7 @@
       <button class="btn btn-stop" id="stopBtn" onclick="sendStop()">STOP (0)</button>
     </div>
     <div class="range-hint">Range: -3276.8 .. 3276.7 kW | Step: 0.1 kW</div>
+    <div id="blockBanner" style="display:none; background:#c0392b; color:#fff; padding:6px 12px; border-radius:6px; margin-top:6px; font-weight:600; text-align:center;"></div>
     <div class="presets">
       <button class="preset-charge" onclick="setPreset(-3276.8)">-3276.8 (Max Charge)</button>
       <button class="preset-charge" onclick="setPreset(-1000)">-1000</button>
@@ -296,6 +349,99 @@
       <button class="preset-discharge" onclick="setPreset(3276.7)">+3276.7 (Max Discharge)</button>
     </div>
     <div class="result" id="cmdResult"></div>
+  </div>
+
+  <!-- Frequency Plan (Ichiji 一次調整力) -->
+  <div class="freq-section" id="freqSection">
+    <h2>Frequency Response (一次調整力)</h2>
+
+    <!-- Realtime frequency monitor -->
+    <div class="freq-monitor" id="freqMonitor">
+      <div class="fm-item">
+        <div class="fm-label">Transducer</div>
+        <div class="fm-value" id="fmTransducerStatus">--</div>
+      </div>
+      <div class="fm-item">
+        <div class="fm-label">Frequency (Hz)</div>
+        <div class="fm-value" id="fmFrequency">--</div>
+      </div>
+      <div class="fm-item">
+        <div class="fm-label">Effective f (Hz)</div>
+        <div class="fm-value" id="fmEffFreq">--</div>
+      </div>
+      <div class="fm-item">
+        <div class="fm-label">Delta f (Hz)</div>
+        <div class="fm-value" id="fmDeltaF">--</div>
+      </div>
+      <div class="fm-item">
+        <div class="fm-label">Delta P (kW)</div>
+        <div class="fm-value" id="fmDeltaP">--</div>
+      </div>
+      <div class="fm-item">
+        <div class="fm-label">Command (kW)</div>
+        <div class="fm-value" id="fmCmdPower">--</div>
+      </div>
+      <div class="fm-item">
+        <div class="fm-label">Abnormal</div>
+        <div class="fm-value" id="fmAbnormal">--</div>
+      </div>
+    </div>
+
+    <!-- Frequency plan form -->
+    <h3 style="font-size:0.9rem;color:#aaa;margin-top:18px;margin-bottom:8px;">Create Frequency Plan</h3>
+    <div class="freq-form">
+      <div class="field">
+        <label>Base Freq (Hz)</label>
+        <select id="freqBase"><option value="50">50</option><option value="60">60</option></select>
+      </div>
+      <div class="field">
+        <label>Baseline (kW)</label>
+        <input type="number" id="freqBaseline" value="0" step="0.1" />
+      </div>
+      <div class="field">
+        <label>Abnormal (Hz)</label>
+        <input type="number" id="freqAbnormal" value="49.8" step="0.01" min="0" />
+      </div>
+      <div class="field">
+        <label>Deadband (Hz)</label>
+        <input type="number" id="freqDeadband" value="0.01" step="0.001" min="0.001" />
+      </div>
+      <div class="field">
+        <label>Droop (%)</label>
+        <input type="number" id="freqDroop" value="5" step="0.1" min="0.1" max="5" />
+      </div>
+      <div class="field">
+        <label>Awarded (kW)</label>
+        <input type="number" id="freqAwarded" value="300" step="1" min="1" />
+      </div>
+      <div class="checkbox-field">
+        <input type="checkbox" id="freqEnabled" />
+        <label for="freqEnabled" style="font-size:0.85rem;color:#eee;cursor:pointer;">Enable</label>
+      </div>
+      <button class="btn-add" onclick="addFreqPlan()">Save Plan</button>
+    </div>
+    <div class="sched-result" id="freqResult"></div>
+
+    <!-- Frequency plans table -->
+    <div class="freq-plans-table">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Base</th>
+            <th>Baseline</th>
+            <th>Deadband</th>
+            <th>Droop</th>
+            <th>Awarded</th>
+            <th>Enabled</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="freqPlanTableBody">
+          <tr><td colspan="8" class="na">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <!-- Schedule Manager -->
@@ -391,6 +537,44 @@
   <script>
     let pollCount = 0;
     let currentDemandKw = null; // track to disable Send when unchanged
+    let blockedDirections = new Set(); // "charge", "discharge", or both
+
+    // Alarm code → blocked direction (major alarms only)
+    const ALARM_BLOCK_MAP = {
+      BMS0000: "charge",    BMS0003: "discharge",
+      PMS0000: "charge",    PMS0003: "discharge",
+      PMS0008: "charge",    PMS0011: "discharge",
+    };
+
+    const COMMAND_STATUS_ALIAS = {
+      pending: "queued",
+      expired: "timeout",
+      canceled: "timeout",
+      cancelled: "timeout",
+    };
+
+    const COMMAND_STATUS_META = {
+      accepted:  { label: "ACCEPTED",  cls: "cmd-status cmd-status-accepted" },
+      queued:    { label: "QUEUED",    cls: "cmd-status cmd-status-queued" },
+      executing: { label: "EXECUTING", cls: "cmd-status cmd-status-executing" },
+      executed:  { label: "EXECUTED",  cls: "cmd-status cmd-status-executed" },
+      failed:    { label: "FAILED",    cls: "cmd-status cmd-status-failed" },
+      blocked:   { label: "BLOCKED",   cls: "cmd-status cmd-status-blocked" },
+      timeout:   { label: "TIMEOUT",   cls: "cmd-status cmd-status-timeout" },
+      unknown:   { label: "UNKNOWN",   cls: "cmd-status" },
+    };
+    const TARGET_DEVICE_ID = "bess-01";
+
+    function normalizeCommandStatus(raw) {
+      const s = String(raw || "").toLowerCase().trim();
+      if (!s) return "";
+      return COMMAND_STATUS_ALIAS[s] || s;
+    }
+
+    function commandStatusMeta(rawStatus) {
+      const s = normalizeCommandStatus(rawStatus);
+      return COMMAND_STATUS_META[s] || COMMAND_STATUS_META.unknown;
+    }
 
     // ---- Comm status logic ----
     function getCommStatus(comm) {
@@ -467,6 +651,19 @@
         const dpK = parseFloat((tp - dm).toFixed(1));
         document.getElementById("cardPowerSub").textContent = `Demand: ${dm} kW | ΔP: ${dpK >= 0 ? "+" : ""}${dpK} kW`;
       }
+      // PMS status badge
+      const pmsStatusSpan = document.getElementById("cardPMSStatus");
+      if (pmsStatusSpan && pms) {
+        const st = pms.status || "normal";
+        const badge = st === "major" ? "\uD83D\uDD34" : st === "minor" ? "\uD83D\uDFE1" : "\uD83D\uDFE2";
+        pmsStatusSpan.className = `status-badge status-${st}`;
+        pmsStatusSpan.textContent = `${badge} ${st.toUpperCase()}`;
+      }
+      // PMS card border color based on alarm status
+      const powerCard = document.getElementById("cardPower");
+      if (pms && pms.status === "major") powerCard.className = "card error";
+      else if (pms && pms.status === "minor") powerCard.className = "card warn";
+      else powerCard.className = "card";
 
       // SOC card — average of BMS1 + BMS2
       const socVals = [bms1, bms2].map(b => b && b.soc_pct !== null ? b.soc_pct : null).filter(v => v !== null);
@@ -482,9 +679,15 @@
       const lc = snap.last_command;
       if (lc && lc.kw !== null) {
         const lcLabel = lc.kw > 0 ? "Discharge" : lc.kw < 0 ? "Charge" : "Stop";
+        const stMeta = commandStatusMeta(lc.status);
+        const cmdRef = lc.command_id ? `${lc.command_id} | ` : "";
         document.getElementById("cardCmdVal").textContent = `${lc.kw} kW (${lcLabel})`;
         const lcTime = lc.ts ? new Date(lc.ts).toLocaleTimeString() : "";
-        document.getElementById("cardCmdSub").textContent = lc.error ? `ERR: ${lc.error}` : `raw=${lc.raw} @ ${lcTime}`;
+        const cmdSub = document.getElementById("cardCmdSub");
+        cmdSub.className = `card-sub ${stMeta.cls}`;
+        cmdSub.textContent = lc.error
+          ? `ERR: ${lc.error}`
+          : `${cmdRef}${stMeta.label} | raw=${lc.raw} @ ${lcTime}`;
         document.getElementById("cardCmd").className = lc.error ? "card error" : "card";
       }
 
@@ -494,15 +697,25 @@
 
       // Multimeter card
       const mm = d.multimeter;
-      if (mm && mm.active_power_kw !== null) {
+      const mmToggle = document.getElementById("mmToggle");
+      if (mm && mm.disabled) {
+        mmToggle.checked = false;
+        document.getElementById("cardMMVal").textContent = "Disabled";
+        document.getElementById("cardMMSub").textContent = "Toggle ON to enable RTU polling";
+        document.getElementById("cardMM").className = "card";
+        document.getElementById("cardMM").style.opacity = "0.45";
+      } else if (mm && mm.active_power_kw !== null) {
+        mmToggle.checked = true;
         document.getElementById("cardMMVal").textContent = `${mm.active_power_kw} kW`;
         const mmComm = getCommStatus(mm.comm);
         document.getElementById("cardMMSub").textContent = `RTU slave=${mm.unit_id || 10} | ${mmComm.text}`;
         document.getElementById("cardMM").className = mmComm.cls === "comm-ok" ? "card" : "card warn";
+        document.getElementById("cardMM").style.opacity = "1";
       } else {
         document.getElementById("cardMMVal").textContent = "-- kW";
         document.getElementById("cardMMSub").textContent = mm ? "No data" : "Bridge not running";
         document.getElementById("cardMM").className = "card warn";
+        document.getElementById("cardMM").style.opacity = "1";
       }
 
       // ---- Per-device cards (PCS1, PCS2, BMS1, BMS2) ----
@@ -510,6 +723,9 @@
       updatePCSCard("PCS2", "cardPCS2", pcs2);
       updateBMSCard("BMS1", "cardBMS1", bms1);
       updateBMSCard("BMS2", "cardBMS2", bms2);
+
+      // ---- Alarm panel ----
+      updateAlarmPanel(d);
 
       // ---- Device table ----
       const rows = [
@@ -543,12 +759,85 @@
       const span = document.getElementById(cardId + "Comm");
       span.textContent = cs.text;
       span.className = cs.cls;
+
+      // Status badge
+      const statusSpan = document.getElementById(cardId + "Status");
+      if (statusSpan && dev) {
+        const st = dev.status || "normal";
+        const badge = st === "major" ? "\uD83D\uDD34" : st === "minor" ? "\uD83D\uDFE1" : "\uD83D\uDFE2";
+        statusSpan.className = `status-badge status-${st}`;
+        statusSpan.textContent = `${badge} ${st.toUpperCase()}`;
+      } else if (statusSpan) {
+        statusSpan.className = ""; statusSpan.textContent = "";
+      }
+
+      // Alarm codes on card
+      const alarmsEl = document.getElementById(cardId + "Alarms");
+      if (alarmsEl && dev && dev.occurs_alarms && dev.occurs_alarms.length) {
+        alarmsEl.innerHTML = dev.occurs_alarms.map(a => {
+          const cls = a.includes("0000") || a.includes("0003") ? "alarm-chip alarm-chip-major" : "alarm-chip alarm-chip-minor";
+          return `<span class="${cls}">${a}</span>`;
+        }).join(" ");
+      } else if (alarmsEl) {
+        alarmsEl.innerHTML = "";
+      }
+
       const card = document.getElementById(cardId);
       let cls = "card";
-      if (cs.cls !== "comm-ok") cls = cs.cls === "comm-stale" ? "card warn" : "card error";
+      if (dev && dev.status === "major") cls = "card error";
+      else if (dev && dev.status === "minor") cls = "card warn";
+      else if (cs.cls !== "comm-ok") cls = cs.cls === "comm-stale" ? "card warn" : "card error";
       else if (dev && dev.soc_pct !== null && dev.soc_pct <= 10) cls = "card error";
       else if (dev && dev.soc_pct !== null && dev.soc_pct <= 20) cls = "card warn";
       card.className = cls;
+    }
+
+    // ---- Alarm panel (aggregates all device alarms) ----
+    function updateAlarmPanel(d) {
+      const body = document.getElementById("alarmPanelBody");
+      const ALARM_DEFS = {
+        BMS0000: "major", BMS0001: "minor", BMS0002: "minor", BMS0003: "major",
+        PMS0000: "major", PMS0001: "minor", PMS0002: "minor", PMS0003: "major",
+        PMS0008: "major", PMS0009: "minor", PMS0010: "minor", PMS0011: "major",
+      };
+      const chips = [];
+      const newBlocked = new Set();
+      for (const [key, dev] of [["BMS1", d.bms1], ["BMS2", d.bms2], ["PMS", d.pms]]) {
+        if (!dev || !dev.occurs_alarms) continue;
+        for (const code of dev.occurs_alarms) {
+          const lvl = ALARM_DEFS[code] || "minor";
+          const cls = lvl === "major" ? "alarm-chip alarm-chip-major" : "alarm-chip alarm-chip-minor";
+          chips.push(`<span class="${cls}">${key}: ${code}</span>`);
+          // Compute blocked directions from confirmed major alarms
+          if (dev.status === "major" && ALARM_BLOCK_MAP[code]) {
+            newBlocked.add(ALARM_BLOCK_MAP[code]);
+          }
+        }
+      }
+      blockedDirections = newBlocked;
+      if (chips.length) {
+        body.className = "alarm-list";
+        body.innerHTML = chips.join("");
+      } else {
+        body.className = "alarm-none";
+        body.innerHTML = "No alarms";
+      }
+      // Update blocking banner
+      const banner = document.getElementById("blockBanner");
+      if (newBlocked.has("charge") && newBlocked.has("discharge")) {
+        banner.style.display = "block";
+        banner.textContent = "\u26D4 All commands blocked \u2014 BMS1 full + BMS2 empty";
+      } else if (newBlocked.has("charge")) {
+        banner.style.display = "block";
+        banner.textContent = "\u26A0\uFE0F Charge blocked \u2014 SOC full (discharge allowed)";
+      } else if (newBlocked.has("discharge")) {
+        banner.style.display = "block";
+        banner.textContent = "\u26A0\uFE0F Discharge blocked \u2014 SOC empty (charge allowed)";
+      } else {
+        banner.style.display = "none";
+        banner.textContent = "";
+      }
+      updateSendBtnState();
     }
 
     function deviceRowPMS(label, dev) {
@@ -648,13 +937,16 @@
       try {
         const resp = await fetch("/api/pms/demand", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ demand_control_power_kw: kw }),
+          body: JSON.stringify({ demand_control_power_kw: kw, device_id: TARGET_DEVICE_ID }),
         });
         const data = await resp.json();
         if (data.ok) {
           const label = kw > 0 ? "Discharge" : kw < 0 ? "Charge" : "Stop";
+          const accepted = commandStatusMeta(data.status || "accepted").label;
+          const queued = commandStatusMeta(data.queued_status || "queued").label;
+          const cmdRef = data.command_id ? `${data.command_id} | ` : "";
           result.className = "result ok";
-          result.textContent = `OK \u2014 ${label} ${data.written_kw} kW (raw=${data.written_raw}) @ ${new Date().toLocaleTimeString()}`;
+          result.textContent = `OK \u2014 ${cmdRef}${label} ${data.written_kw} kW (raw=${data.written_raw}) | ${accepted} \u2192 ${queued} @ ${new Date().toLocaleTimeString()}`;
           document.getElementById("demandInput").value = kw;
         } else {
           result.className = "result err";
@@ -680,6 +972,10 @@
       const kw = parseFloat(input.value);
       // Disable if: NaN, out of range, or same as current demand (to 1 decimal)
       if (isNaN(kw) || kw < -3276.8 || kw > 3276.7) { btn.disabled = true; return; }
+      // Directional block: disable if kW goes in blocked direction
+      if (kw < 0 && blockedDirections.has("charge")) { btn.disabled = true; btn.title = "Charge blocked (SOC full)"; return; }
+      if (kw > 0 && blockedDirections.has("discharge")) { btn.disabled = true; btn.title = "Discharge blocked (SOC empty)"; return; }
+      btn.title = "";
       if (currentDemandKw !== null && parseFloat(kw.toFixed(1)) === parseFloat(currentDemandKw.toFixed ? currentDemandKw.toFixed(1) : currentDemandKw)) {
         btn.disabled = true;
       } else {
@@ -696,6 +992,18 @@
     // Start polling
     fetchSnapshot();
     setInterval(fetchSnapshot, 1000);
+
+    // ---- Multimeter toggle ----
+    async function toggleMultimeter(enabled) {
+      try {
+        const resp = await fetch("/api/settings/multimeter", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({enabled}),
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+      } catch (e) { console.error("Toggle multimeter failed:", e); }
+    }
 
     // ---- Timeline ----
     let tlAutoInterval = null;
@@ -973,6 +1281,172 @@
       d.appendChild(document.createTextNode(s));
       return d.innerHTML;
     }
+
+    // ========== Frequency Plan Manager (Ichiji) ==========
+
+    // --- Update frequency monitor from snapshot ---
+    function updateFrequencyMonitor(snap) {
+      const td = snap.devices && snap.devices.transducer;
+      const fc = snap.frequency_control;
+
+      // Transducer status
+      const statusEl = document.getElementById('fmTransducerStatus');
+      const freqEl = document.getElementById('fmFrequency');
+      if (td && td.comm && td.comm.ok) {
+        statusEl.textContent = 'OK';
+        statusEl.className = 'fm-value ok';
+        freqEl.textContent = td.frequency_hz != null ? td.frequency_hz.toFixed(3) : '--';
+      } else if (td && td.comm && td.comm.last_ok_ts) {
+        const age = (Date.now() - new Date(td.comm.last_ok_ts).getTime()) / 1000;
+        if (age < 10) {
+          statusEl.textContent = 'STALE';
+          statusEl.className = 'fm-value warn';
+        } else {
+          statusEl.textContent = 'DOWN';
+          statusEl.className = 'fm-value alarm';
+        }
+        freqEl.textContent = td.frequency_hz != null ? td.frequency_hz.toFixed(3) : '--';
+      } else {
+        statusEl.textContent = 'DOWN';
+        statusEl.className = 'fm-value alarm';
+        freqEl.textContent = '--';
+      }
+
+      // Frequency control values
+      if (fc) {
+        document.getElementById('fmEffFreq').textContent = fc.f_eff != null ? fc.f_eff.toFixed(3) : '--';
+        document.getElementById('fmDeltaF').textContent = fc.delta_f != null ? fc.delta_f.toFixed(4) : '--';
+        const dpEl = document.getElementById('fmDeltaP');
+        dpEl.textContent = fc.delta_p_kw != null ? fc.delta_p_kw.toFixed(1) : '--';
+        dpEl.className = 'fm-value' + (fc.delta_p_kw > 0 ? ' warn' : (fc.delta_p_kw < 0 ? ' ok' : ''));
+        document.getElementById('fmCmdPower').textContent = fc.p_cmd_kw != null ? fc.p_cmd_kw.toFixed(1) : '--';
+        const abEl = document.getElementById('fmAbnormal');
+        abEl.textContent = fc.abnormal_event ? 'YES' : 'NO';
+        abEl.className = 'fm-value' + (fc.abnormal_event ? ' alarm' : ' ok');
+      } else {
+        ['fmEffFreq','fmDeltaF','fmDeltaP','fmCmdPower'].forEach(id => {
+          document.getElementById(id).textContent = '--';
+        });
+        const abEl = document.getElementById('fmAbnormal');
+        abEl.textContent = '--'; abEl.className = 'fm-value';
+      }
+    }
+
+    // --- Load frequency plans ---
+    let freqPlansList = [];
+    async function loadFreqPlans() {
+      try {
+        const resp = await fetch('/api/plans');
+        if (!resp.ok) throw new Error(resp.statusText);
+        freqPlansList = await resp.json();
+        renderFreqPlans();
+      } catch (err) {
+        document.getElementById('freqPlanTableBody').innerHTML =
+          `<tr><td colspan="8" class="na">Error: ${escHtml(err.message)}</td></tr>`;
+      }
+    }
+
+    function renderFreqPlans() {
+      const tbody = document.getElementById('freqPlanTableBody');
+      if (!freqPlansList.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="na">No frequency plans.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = freqPlansList.map(p => {
+        const enabledBadge = p.enabled
+          ? '<span style="color:#0f6;font-weight:700">ON</span>'
+          : '<span style="color:#888">OFF</span>';
+        const delBtn = p.enabled
+          ? `<button class="btn-del" onclick="disableFreqPlan(${p.id})">Disable</button>`
+          : '<span class="na">--</span>';
+        return `<tr>
+          <td>${p.id}</td>
+          <td>${p.base_frequency_hz} Hz</td>
+          <td>${p.baseline_power_kw} kW</td>
+          <td>${p.deadband_hz} Hz</td>
+          <td>${p.droop_percent}%</td>
+          <td>${p.awarded_power_kw} kW</td>
+          <td>${enabledBadge}</td>
+          <td>${delBtn}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // --- Add frequency plan ---
+    async function addFreqPlan() {
+      const result = document.getElementById('freqResult');
+      const body = {
+        base_frequency_hz: parseFloat(document.getElementById('freqBase').value),
+        baseline_power_kw: parseFloat(document.getElementById('freqBaseline').value),
+        abnormal_frequency_hz: parseFloat(document.getElementById('freqAbnormal').value),
+        deadband_hz: parseFloat(document.getElementById('freqDeadband').value),
+        droop_percent: parseFloat(document.getElementById('freqDroop').value),
+        awarded_power_kw: parseFloat(document.getElementById('freqAwarded').value),
+        enabled: document.getElementById('freqEnabled').checked,
+      };
+
+      if (body.deadband_hz <= 0) { result.className = 'sched-result err'; result.textContent = 'Deadband must be > 0'; return; }
+      if (body.droop_percent <= 0 || body.droop_percent > 5) { result.className = 'sched-result err'; result.textContent = 'Droop must be 0-5%'; return; }
+      if (body.awarded_power_kw <= 0) { result.className = 'sched-result err'; result.textContent = 'Awarded power must be > 0'; return; }
+
+      result.className = 'sched-result'; result.textContent = 'Saving...';
+      try {
+        const resp = await fetch('/api/plans', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          result.className = 'sched-result err';
+          result.textContent = data.error || 'Failed to create plan';
+          return;
+        }
+        result.className = 'sched-result ok';
+        result.textContent = `Plan #${data.id} saved (${data.enabled ? 'ENABLED' : 'disabled'})`;
+        await loadFreqPlans();
+      } catch (err) {
+        result.className = 'sched-result err';
+        result.textContent = `Network error: ${escHtml(err.message)}`;
+      }
+    }
+
+    // --- Disable frequency plan ---
+    async function disableFreqPlan(id) {
+      const result = document.getElementById('freqResult');
+      if (!confirm(`Disable frequency plan #${id}?`)) return;
+      try {
+        const resp = await fetch(`/api/plans/${id}`, { method: 'DELETE' });
+        if (!resp.ok) throw new Error('Failed to disable');
+        result.className = 'sched-result ok';
+        result.textContent = `Plan #${id} disabled.`;
+        await loadFreqPlans();
+      } catch (err) {
+        result.className = 'sched-result err';
+        result.textContent = `Error: ${escHtml(err.message)}`;
+      }
+    }
+
+    // --- Hook into snapshot polling ---
+    const _origPoll = setInterval;  // already polling /api/snapshot
+    // Inject updateFrequencyMonitor into existing poll cycle
+    (function patchSnapshotPoll() {
+      // The existing poll is in the DOMContentLoaded handler above.
+      // We override by adding a secondary interval that reads the same data.
+      setInterval(async () => {
+        try {
+          const resp = await fetch('/api/snapshot');
+          if (resp.ok) {
+            const snap = await resp.json();
+            updateFrequencyMonitor(snap);
+          }
+        } catch {}
+      }, 2000);
+    })();
+
+    // --- Initial load + auto-refresh ---
+    loadFreqPlans();
+    setInterval(loadFreqPlans, 15_000);
 
     // --- Initial load + auto-refresh ---
     loadSchedules();
