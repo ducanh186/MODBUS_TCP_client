@@ -189,6 +189,7 @@ def _ensure_command_contract_schema(conn) -> None:
     if _command_schema_ready:
         return
 
+    device_id_default_sql = DEFAULT_DEVICE_ID.replace("'", "''")
     cur = conn.cursor()
     try:
         cur.execute(
@@ -217,8 +218,7 @@ def _ensure_command_contract_schema(conn) -> None:
         if not cur.fetchone():
             cur.execute(
                 "ALTER TABLE commands "
-                "ADD COLUMN device_id TEXT NOT NULL DEFAULT %s",
-                (DEFAULT_DEVICE_ID,),
+                f"ADD COLUMN device_id TEXT NOT NULL DEFAULT '{device_id_default_sql}'"
             )
 
         cur.execute(
@@ -272,7 +272,9 @@ def _ensure_command_contract_schema(conn) -> None:
         )
 
         cur.execute("ALTER TABLE commands ALTER COLUMN command_id SET NOT NULL")
-        cur.execute("ALTER TABLE commands ALTER COLUMN device_id SET DEFAULT %s", (DEFAULT_DEVICE_ID,))
+        cur.execute(
+            f"ALTER TABLE commands ALTER COLUMN device_id SET DEFAULT '{device_id_default_sql}'"
+        )
         cur.execute("ALTER TABLE commands ALTER COLUMN device_id SET NOT NULL")
         cur.execute("ALTER TABLE commands ALTER COLUMN created_by SET DEFAULT 'frontend'")
         cur.execute("ALTER TABLE commands ALTER COLUMN created_by SET NOT NULL")
