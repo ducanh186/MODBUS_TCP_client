@@ -1,7 +1,7 @@
 # ==============================================================================
-# deploy.ps1  —  Deploy ec2_api Flask app to EC2 via AWS SSM
+# deploy.ps1  -  Deploy ec2_api Flask app to EC2 via AWS SSM
 #
-# Uses AWS Systems Manager (SSM) instead of SSH — NO .pem key needed,
+# Uses AWS Systems Manager (SSM) instead of SSH - NO .pem key needed,
 # NO port 22, the EC2 instance just needs SSM Agent + IAM role.
 #
 # Prerequisites:
@@ -23,7 +23,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # ==============================================================================
-# SECTION 1 — CONFIG  (edit before first deploy)
+# SECTION 1 - CONFIG  (edit before first deploy)
 # ==============================================================================
 $INSTANCE_ID = "i-02805ff53bc331db6"       # EC2 Instance ID (from AWS Console)
 $EC2_USER    = "ec2-user"                   # Amazon Linux = ec2-user | Ubuntu = ubuntu
@@ -72,7 +72,7 @@ function Send-SsmScript([string]$script, [int]$timeoutSec = 120) {
         TimeoutSeconds = $timeoutSec
     } | ConvertTo-Json -Depth 4 -Compress
     $cliFile = Join-Path $env:TEMP "ssm_cli_input.json"
-    # Write UTF-8 WITHOUT BOM — AWS CLI rejects BOM
+    # Write UTF-8 WITHOUT BOM - AWS CLI rejects BOM
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($cliFile, $cliInput, $utf8NoBom)
 
@@ -96,14 +96,14 @@ function Wait-SsmCommand([string]$commandId) {
             --region $REGION `
             --output json
         if ($LASTEXITCODE -ne 0) {
-            # Invocation record not yet created (race) — keep waiting
+            # Invocation record not yet created (race) - keep waiting
             continue
         }
         $jsonStr = ($rawOutput | Out-String).Trim()
         try {
             $result = $jsonStr | ConvertFrom-Json
         } catch {
-            # Malformed output (transient) — keep waiting
+            # Malformed output (transient) - keep waiting
             $result = $null
         }
     } while ($result -eq $null -or $result.Status -eq "InProgress" -or $result.Status -eq "Pending")
@@ -120,7 +120,7 @@ function Wait-SsmCommand([string]$commandId) {
 }
 
 # ==============================================================================
-# STEP 1 — Preflight checks
+# STEP 1 - Preflight checks
 # ==============================================================================
 Write-Step 1 "Preflight checks"
 
@@ -141,10 +141,10 @@ if (-not $ssmInfo.InstanceInformationList -or $ssmInfo.InstanceInformationList.C
 }
 $pingStatus = $ssmInfo.InstanceInformationList[0].PingStatus
 if ($pingStatus -ne "Online") { throw "Instance SSM status: $pingStatus (must be Online)." }
-Write-Host "  Instance $INSTANCE_ID — SSM Online"
+Write-Host "  Instance $INSTANCE_ID - SSM Online"
 
 # ==============================================================================
-# STEP 2 — Stage files locally (exclude junk)
+# STEP 2 - Stage files locally (exclude junk)
 # ==============================================================================
 Write-Step 2 "Staging files to temp directory"
 
@@ -187,7 +187,7 @@ $fileCount = (Get-ChildItem $STAGE_DIR -Recurse -File).Count
 Write-Host "  Staged $fileCount files + systemd unit."
 
 # ==============================================================================
-# STEP 3 — Package & upload to S3
+# STEP 3 - Package & upload to S3
 # ==============================================================================
 Write-Step 3 "Packaging and uploading to S3"
 
@@ -207,7 +207,7 @@ if ($LASTEXITCODE -ne 0) { throw "S3 upload failed." }
 Write-Host "  Uploaded to s3://${DEPLOY_BUCKET}/${DEPLOY_KEY}"
 
 # ==============================================================================
-# STEP 4 — SSM: Download archive from S3 on EC2
+# STEP 4 - SSM: Download archive from S3 on EC2
 # ==============================================================================
 Write-Step 4 "SSM: downloading archive on EC2"
 
@@ -227,7 +227,7 @@ $cmdId = Send-SsmScript $downloadCmd 120
 Wait-SsmCommand $cmdId | Out-Null
 
 # ==============================================================================
-# STEP 5 — SSM: Install venv + pip + systemd service
+# STEP 5 - SSM: Install venv + pip + systemd service
 # ==============================================================================
 Write-Step 5 "SSM: installing dependencies and configuring service"
 
@@ -267,7 +267,7 @@ $cmdId = Send-SsmScript $installCmd 300
 Wait-SsmCommand $cmdId | Out-Null
 
 # ==============================================================================
-# STEP 6 — SSM: Smoke test
+# STEP 6 - SSM: Smoke test
 # ==============================================================================
 Write-Step 6 "SSM: smoke test"
 
