@@ -222,6 +222,37 @@ def _ensure_command_contract_schema(conn) -> None:
             )
 
         cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'commands' AND column_name = 'created_by'"
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE commands "
+                "ADD COLUMN created_by TEXT NOT NULL DEFAULT 'frontend'"
+            )
+
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'commands' AND column_name = 'executed_at'"
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE commands "
+                "ADD COLUMN executed_at TIMESTAMPTZ"
+            )
+
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'commands' AND column_name = 'expires_at'"
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE commands "
+                "ADD COLUMN expires_at TIMESTAMPTZ NOT NULL "
+                "DEFAULT (now() + INTERVAL '5 minutes')"
+            )
+
+        cur.execute(
             "UPDATE commands "
             "SET command_id = CONCAT('cmd-', to_char(COALESCE(created_at, now()), 'YYYYMMDD-HH24MISS'), '-', LPAD(id::text, 6, '0')) "
             "WHERE command_id IS NULL OR command_id = ''"
@@ -231,10 +262,20 @@ def _ensure_command_contract_schema(conn) -> None:
             "WHERE device_id IS NULL OR device_id = ''",
             (DEFAULT_DEVICE_ID,),
         )
+        cur.execute(
+            "UPDATE commands SET created_by = 'frontend' "
+            "WHERE created_by IS NULL OR created_by = ''"
+        )
+        cur.execute(
+            "UPDATE commands SET expires_at = COALESCE(created_at, now()) + INTERVAL '5 minutes' "
+            "WHERE expires_at IS NULL"
+        )
 
         cur.execute("ALTER TABLE commands ALTER COLUMN command_id SET NOT NULL")
         cur.execute("ALTER TABLE commands ALTER COLUMN device_id SET DEFAULT %s", (DEFAULT_DEVICE_ID,))
         cur.execute("ALTER TABLE commands ALTER COLUMN device_id SET NOT NULL")
+        cur.execute("ALTER TABLE commands ALTER COLUMN created_by SET DEFAULT 'frontend'")
+        cur.execute("ALTER TABLE commands ALTER COLUMN created_by SET NOT NULL")
         cur.execute("ALTER TABLE commands ALTER COLUMN status SET DEFAULT 'queued'")
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_commands_command_id ON commands(command_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS ix_commands_device_status_created ON commands(device_id, status, created_at DESC)")
