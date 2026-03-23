@@ -612,6 +612,7 @@
         const snap = await resp.json();
         pollCount++;
         renderSnapshot(snap);
+        updateFrequencyMonitor(snap);
       } catch (err) {
         document.getElementById("cardConnVal").textContent = "FETCH ERR";
       }
@@ -1292,13 +1293,12 @@
       // Transducer status
       const statusEl = document.getElementById('fmTransducerStatus');
       const freqEl = document.getElementById('fmFrequency');
-      if (td && td.comm && td.comm.ok) {
-        statusEl.textContent = 'OK';
-        statusEl.className = 'fm-value ok';
-        freqEl.textContent = td.frequency_hz != null ? td.frequency_hz.toFixed(3) : '--';
-      } else if (td && td.comm && td.comm.last_ok_ts) {
-        const age = (Date.now() - new Date(td.comm.last_ok_ts).getTime()) / 1000;
-        if (age < 10) {
+      if (td && td.comm && td.comm.last_ok_ts) {
+        const ageSec = (Date.now() - new Date(td.comm.last_ok_ts).getTime()) / 1000;
+        if (ageSec <= 15) {
+          statusEl.textContent = 'OK';
+          statusEl.className = 'fm-value ok';
+        } else if (ageSec <= 30) {
           statusEl.textContent = 'STALE';
           statusEl.className = 'fm-value warn';
         } else {
@@ -1427,22 +1427,8 @@
       }
     }
 
-    // --- Hook into snapshot polling ---
-    const _origPoll = setInterval;  // already polling /api/snapshot
-    // Inject updateFrequencyMonitor into existing poll cycle
-    (function patchSnapshotPoll() {
-      // The existing poll is in the DOMContentLoaded handler above.
-      // We override by adding a secondary interval that reads the same data.
-      setInterval(async () => {
-        try {
-          const resp = await fetch('/api/snapshot');
-          if (resp.ok) {
-            const snap = await resp.json();
-            updateFrequencyMonitor(snap);
-          }
-        } catch {}
-      }, 2000);
-    })();
+    // Frequency monitor is now updated directly in fetchSnapshot() (1s cycle)
+    // — no secondary polling needed.
 
     // --- Initial load + auto-refresh ---
     loadFreqPlans();

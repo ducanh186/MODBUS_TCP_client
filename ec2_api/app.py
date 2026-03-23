@@ -6,6 +6,7 @@ Endpoints:
   POST /auth/token             — authenticate, return JWT (60s TTL)
   POST /api/device             — receive device JSON, save to S3
   GET  /api/device             — read device_data from RDS
+  GET  /api/devices/<id>       — latest telemetry for a specific device
   POST /api/commands           — frontend creates charge/discharge command
   GET  /api/commands           — local polls queued commands
   PATCH /api/commands/<id>     — local updates command lifecycle status
@@ -13,6 +14,11 @@ Endpoints:
   GET  /api/schedules          — list schedules (optional ?status=)
   DELETE /api/schedules/<id>   — soft-delete (cancel) a schedule
   GET  /api/schedules/active   — active + future schedules
+  POST /api/plans              — create frequency plan
+  GET  /api/plans              — list frequency plans
+  GET  /api/plans/active       — active (enabled) frequency plan
+  DELETE /api/plans/<id>       — disable frequency plan
+  GET  /api/frequency-control/snapshot — latest frequency control runtime state
   GET  /                       — serve frontend
 """
 
@@ -1306,6 +1312,84 @@ def delete_schedule(schedule_id):
     finally:
         cur.close()
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Transducer & Frequency-Control snapshot endpoints
+# ---------------------------------------------------------------------------
+@app.route("/api/devices/<device_id_param>", methods=["GET"])
+def get_device_latest(device_id_param):
+    """Get the latest telemetry snapshot for a specific device (e.g. transducer-01)."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT device_id, ts, payload "
+                "FROM device_data WHERE device_id = %s "
+                "ORDER BY ts DESC LIMIT 1",
+                (device_id_param,),
+            )
+            r = cur.fetchone()
+        finally:
+            cur.close()
+            conn.close()
+
+        if not r:
+            return jsonify(None)
+
+        payload = r[2] if isinstance(r[2], dict) else json.loads(r[2])
+        ts = r[1]
+        if ts and hasattr(ts, 'isoformat'):
+            ts = ts.isoformat()
+
+        return jsonify({
+            "device_id": r[0],
+            "timestamp": ts,
+            "data": payload,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/frequency-control/snapshot", methods=["GET"])
+def get_frequency_control_snapshot():
+    """Get the latest frequency-control runtime snapshot.
+
+    This reads the most recent device_data row where device_id='frequency-control',
+    uploaded by the local_client's frequency control loop every 0.5s.
+    """
+    device_id = request.args.get("device_id", "frequency-control")
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT device_id, ts, payload "
+                "FROM device_data WHERE device_id = %s "
+                "ORDER BY ts DESC LIMIT 1",
+                (device_id,),
+            )
+            r = cur.fetchone()
+        finally:
+            cur.close()
+            conn.close()
+
+        if not r:
+            return jsonify(None)
+
+        payload = r[2] if isinstance(r[2], dict) else json.loads(r[2])
+        ts = r[1]
+        if ts and hasattr(ts, 'isoformat'):
+            ts = ts.isoformat()
+
+        return jsonify({
+            "device_id": r[0],
+            "timestamp": ts,
+            **payload,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------

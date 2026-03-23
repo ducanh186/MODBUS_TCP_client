@@ -460,7 +460,8 @@ def command_poll_loop(tm: TokenManager, api_url: str,
                       modbus_port: int = 15020,
                       interval: int = 10,
                       alarm_tracker: Optional["AlarmTracker"] = None,
-                      device_id: str = DEFAULT_DEVICE_ID):
+                      device_id: str = DEFAULT_DEVICE_ID,
+                      freq_mode_active: Optional[threading.Event] = None):
     """Poll queued commands, set executing, apply to Modbus, then set final status."""
     api_url = api_url.rstrip("/")
     while True:
@@ -492,12 +493,15 @@ def command_poll_loop(tm: TokenManager, api_url: str,
                         log.warning("    Cannot mark %s as executing: %s", cmd_ref, begin_resp.text[:140])
                         continue
 
+                    # Block if frequency mode is active (PMS HR0 owned by freq loop)
+                    if freq_mode_active and freq_mode_active.is_set():
+                        log.warning("    %s BLOCKED — frequency mode active, disable plan first", cmd_ref)
+                        status = STATUS_BLOCKED
                     # Directional block check
-                    blocked = alarm_tracker.get_blocked_directions() if alarm_tracker else set()
-                    if cmd_type == "charge" and "charge" in blocked:
+                    elif cmd_type == "charge" and (alarm_tracker.get_blocked_directions() if alarm_tracker else set()) & {"charge"}:
                         log.warning("    %s BLOCKED — charge not allowed (SOC full)", cmd_ref)
                         status = STATUS_BLOCKED
-                    elif cmd_type == "discharge" and "discharge" in blocked:
+                    elif cmd_type == "discharge" and (alarm_tracker.get_blocked_directions() if alarm_tracker else set()) & {"discharge"}:
                         log.warning("    %s BLOCKED — discharge not allowed (SOC empty)", cmd_ref)
                         status = STATUS_BLOCKED
                     else:
@@ -980,6 +984,28 @@ def frequency_control_loop(
                 time.sleep(interval)
                 continue
 
+            # Fresh alarm read (0.5s cadence, independent of schedule loop's 10s)
+            try:
+                from pymodbus.client import ModbusTcpClient as _FcCli
+                for _dev, _port_off, _decode_fn in [
+                    ("BMS1", 4, decode_bms_alarm),
+                    ("BMS2", 5, decode_bms_alarm),
+                    ("PMS",  0, decode_pms_alarm),
+                ]:
+                    _alarm_addr = 3 if _dev.startswith("BMS") else 4
+                    _fc = _FcCli(modbus_host, port=modbus_port + _port_off, timeout=1)
+                    if _fc.connect():
+                        _rr = _fc.read_input_registers(_alarm_addr, count=1, device_id=1)
+                        _fc.close()
+                        if not _rr.isError():
+                            alarm_tracker.update(_dev, _decode_fn(_rr.registers[0]))
+                    else:
+                        alarm_tracker.update(_dev, [])
+            except ImportError:
+                pass
+            except Exception as _ae:
+                log.debug("Freq loop alarm read error: %s", _ae)
+
             # Compute command
             blocked = alarm_tracker.get_blocked_directions()
             result = compute_frequency_command(
@@ -1017,7 +1043,15 @@ def frequency_control_loop(
         except Exception as e:
             log.error("Frequency control error: %s", e)
 
-        time.sleep(interval)
+        # Use command_interval_ms from plan if available, else default
+        cmd_interval_s = interval
+        if cached_plan:
+            try:
+                cmd_interval_s = float(cached_plan.get("command_interval_ms", 500)) / 1000.0
+                cmd_interval_s = max(0.1, min(cmd_interval_s, 5.0))  # sanity clamp
+            except (TypeError, ValueError):
+                pass
+        time.sleep(cmd_interval_s)
 
 
 # ---------------------------------------------------------------------------
@@ -1079,7 +1113,8 @@ def main():
                           daemon=True)
     t2 = threading.Thread(target=command_poll_loop,
                           args=(tm, args.api_url, args.modbus_host, args.modbus_port,
-                                args.interval, alarm_tracker, args.device_id),
+                                args.interval, alarm_tracker, args.device_id,
+                                freq_mode_active),
                           daemon=True)
     t3 = threading.Thread(target=schedule_execution_loop,
                           args=(tm, args.api_url, args.modbus_host, args.modbus_port,
