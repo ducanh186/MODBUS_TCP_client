@@ -181,7 +181,9 @@ $envBlock
 [Install]
 WantedBy=multi-user.target
 "@
-$serviceContent | Out-File -FilePath (Join-Path $STAGE_DIR "${SERVICE}.service") -Encoding utf8NoBOM -NoNewline
+$serviceUnitPath = Join-Path $STAGE_DIR "${SERVICE}.service"
+$serviceUtf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($serviceUnitPath, $serviceContent, $serviceUtf8NoBom)
 
 $fileCount = (Get-ChildItem $STAGE_DIR -Recurse -File).Count
 Write-Host "  Staged $fileCount files + systemd unit."
