@@ -844,16 +844,17 @@
     function deviceRowPMS(label, dev) {
       if (!dev) return `<tr><td><b>${label}</b></td><td colspan="9" class="na">No data</td></tr>`;
       const cs = getCommStatus(dev.comm);
+      const na = '<span class="na">\u2014</span>';
       return `<tr>
         <td><b>${label}</b></td>
         <td>15020</td>
         <td>${dev.unit_id}</td>
-        <td title="${tip(dev.demand_control_power_raw, dev.demand_control_power_meta)}">${fmtVal(dev.demand_control_power_kw)}</td>
-        <td title="${tip(dev.total_active_power_raw, dev.total_active_power_meta)}">${fmtVal(dev.total_active_power_kw)}</td>
+        <td title="HR40420 U32 gain=10 kW">${fmtVal(dev.demand_control_power_kw)}</td>
+        <td title="HR40525 I32 gain=1000 kW">${fmtVal(dev.total_active_power_kw)}</td>
         <td>${deltaPHtml(dev.demand_control_power_kw, dev.total_active_power_kw)}</td>
-        <td title="${tip(dev.soc_avg_raw, dev.soc_avg_meta)}">${fmtVal(dev.soc_avg_pct)}</td>
-        <td title="${tip(dev.soh_avg_raw, dev.soh_avg_meta)}">${fmtVal(dev.soh_avg_pct)}</td>
-        <td title="${tip(dev.capacity_total_raw, dev.capacity_total_meta)}">${fmtVal(dev.capacity_total_kwh)}</td>
+        <td class="na">${na}</td>
+        <td class="na">${na}</td>
+        <td class="na">${na}</td>
         <td class="${cs.cls}" title="${cs.tip}">${cs.text}</td>
       </tr>`;
     }

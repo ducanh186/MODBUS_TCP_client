@@ -830,34 +830,21 @@ def _build_snapshot_from_db():
 
     now = datetime.now(timezone.utc).isoformat()
 
-    # Build PMS
+    # Build PMS (Huawei HR addresses — no SOC/SOH/Capacity, read those from BMS)
     pms_data = latest.get("PMS")
     if pms_data:
         p = pms_data["payload"]
         demand_kw = p.get("demand_control_power")
         total_kw = p.get("total_active_power")
-        soc_avg = p.get("soc_avg")
-        soh_avg = p.get("soh_avg")
-        cap_total = p.get("capacity_total")
-        demand_raw = _encode_power_kw(demand_kw) if demand_kw is not None else None
-        total_raw = _encode_power_kw(total_kw) if total_kw is not None else None
         pms = {
             "unit_id": 1,
             "demand_control_power_kw": demand_kw,
             "total_active_power_kw": total_kw,
-            "soc_avg_pct": soc_avg,
-            "soh_avg_pct": soh_avg,
-            "capacity_total_kwh": cap_total,
-            "demand_control_power_raw": demand_raw,
-            "total_active_power_raw": total_raw,
-            "soc_avg_raw": int(soc_avg) if soc_avg is not None else None,
-            "soh_avg_raw": int(soh_avg) if soh_avg is not None else None,
-            "capacity_total_raw": int(round(cap_total / POWER_SCALE)) if cap_total is not None else None,
-            "demand_control_power_meta": {"reg": "HR0", "scale": 0.1, "unit": "kW", "fc": "FC03"},
-            "total_active_power_meta": {"reg": "IR0", "scale": 0.1, "unit": "kW", "fc": "FC04"},
-            "soc_avg_meta": {"reg": "IR1", "scale": 1, "unit": "%", "fc": "FC04"},
-            "soh_avg_meta": {"reg": "IR2", "scale": 1, "unit": "%", "fc": "FC04"},
-            "capacity_total_meta": {"reg": "IR3", "scale": 0.1, "unit": "kWh", "fc": "FC04"},
+            "soc_avg_pct": None,
+            "soh_avg_pct": None,
+            "capacity_total_kwh": None,
+            "demand_control_power_meta": {"reg": "HR40420", "type": "U32", "gain": 10, "unit": "kW", "fc": "FC03"},
+            "total_active_power_meta": {"reg": "HR40525", "type": "I32", "gain": 1000, "unit": "kW", "fc": "FC03"},
             "occurs_alarms": p.get("occurs_alarms", []),
             "status": p.get("status", "normal"),
             "comm": _build_comm(pms_data["ts"]),
@@ -867,19 +854,14 @@ def _build_snapshot_from_db():
             "unit_id": 1,
             "demand_control_power_kw": None, "total_active_power_kw": None,
             "soc_avg_pct": None, "soh_avg_pct": None, "capacity_total_kwh": None,
-            "demand_control_power_raw": None, "total_active_power_raw": None,
-            "soc_avg_raw": None, "soh_avg_raw": None, "capacity_total_raw": None,
-            "demand_control_power_meta": {"reg": "HR0", "scale": 0.1, "unit": "kW", "fc": "FC03"},
-            "total_active_power_meta": {"reg": "IR0", "scale": 0.1, "unit": "kW", "fc": "FC04"},
-            "soc_avg_meta": {"reg": "IR1", "scale": 1, "unit": "%", "fc": "FC04"},
-            "soh_avg_meta": {"reg": "IR2", "scale": 1, "unit": "%", "fc": "FC04"},
-            "capacity_total_meta": {"reg": "IR3", "scale": 0.1, "unit": "kWh", "fc": "FC04"},
+            "demand_control_power_meta": {"reg": "HR40420", "type": "U32", "gain": 10, "unit": "kW", "fc": "FC03"},
+            "total_active_power_meta": {"reg": "HR40525", "type": "I32", "gain": 1000, "unit": "kW", "fc": "FC03"},
             "occurs_alarms": [],
             "status": "normal",
             "comm": {"ok": False, "last_ok_ts": None, "last_error": "not polled yet"},
         }
 
-    # Build PCS1, PCS2
+    # Build PCS1, PCS2 (Huawei IR addresses)
     def build_pcs(did, port):
         d = latest.get(did)
         if d:
@@ -888,18 +870,17 @@ def _build_snapshot_from_db():
             return {
                 "unit_id": 1, "port": port,
                 "active_power_kw": ap,
-                "active_power_raw": _encode_power_kw(ap) if ap is not None else None,
-                "active_power_meta": {"reg": "IR0", "scale": 0.1, "unit": "kW", "fc": "FC04"},
+                "active_power_meta": {"reg": "IR32080", "type": "I32", "gain": 1000, "unit": "kW", "fc": "FC04"},
                 "comm": _build_comm(d["ts"]),
             }
         return {
             "unit_id": 1, "port": port,
-            "active_power_kw": None, "active_power_raw": None,
-            "active_power_meta": {"reg": "IR0", "scale": 0.1, "unit": "kW", "fc": "FC04"},
+            "active_power_kw": None,
+            "active_power_meta": {"reg": "IR32080", "type": "I32", "gain": 1000, "unit": "kW", "fc": "FC04"},
             "comm": {"ok": False, "last_ok_ts": None, "last_error": "not polled yet"},
         }
 
-    # Build BMS1, BMS2
+    # Build BMS1, BMS2 (Huawei IR addresses)
     def build_bms(did, port):
         d = latest.get(did)
         if d:
@@ -910,12 +891,9 @@ def _build_snapshot_from_db():
             return {
                 "unit_id": 1, "port": port,
                 "soc_pct": soc, "soh_pct": soh, "capacity_kwh": cap,
-                "soc_raw": int(soc) if soc is not None else None,
-                "soh_raw": int(soh) if soh is not None else None,
-                "capacity_raw": int(round(cap / POWER_SCALE)) if cap is not None else None,
-                "soc_meta": {"reg": "IR0", "scale": 1, "unit": "%", "fc": "FC04"},
-                "soh_meta": {"reg": "IR1", "scale": 1, "unit": "%", "fc": "FC04"},
-                "capacity_meta": {"reg": "IR2", "scale": 0.1, "unit": "kWh", "fc": "FC04"},
+                "soc_meta": {"reg": "IR30105", "type": "U16", "gain": 1, "unit": "%", "fc": "FC04"},
+                "soh_meta": {"reg": "IR30106", "type": "U16", "gain": 1, "unit": "%", "fc": "FC04"},
+                "capacity_meta": {"reg": "IR30058", "type": "U32", "gain": 10, "unit": "kWh", "fc": "FC04"},
                 "occurs_alarms": p.get("occurs_alarms", []),
                 "status": p.get("status", "normal"),
                 "comm": _build_comm(d["ts"]),
@@ -923,10 +901,9 @@ def _build_snapshot_from_db():
         return {
             "unit_id": 1, "port": port,
             "soc_pct": None, "soh_pct": None, "capacity_kwh": None,
-            "soc_raw": None, "soh_raw": None, "capacity_raw": None,
-            "soc_meta": {"reg": "IR0", "scale": 1, "unit": "%", "fc": "FC04"},
-            "soh_meta": {"reg": "IR1", "scale": 1, "unit": "%", "fc": "FC04"},
-            "capacity_meta": {"reg": "IR2", "scale": 0.1, "unit": "kWh", "fc": "FC04"},
+            "soc_meta": {"reg": "IR30105", "type": "U16", "gain": 1, "unit": "%", "fc": "FC04"},
+            "soh_meta": {"reg": "IR30106", "type": "U16", "gain": 1, "unit": "%", "fc": "FC04"},
+            "capacity_meta": {"reg": "IR30058", "type": "U32", "gain": 10, "unit": "kWh", "fc": "FC04"},
             "occurs_alarms": [],
             "status": "normal",
             "comm": {"ok": False, "last_ok_ts": None, "last_error": "not polled yet"},
