@@ -232,11 +232,11 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None,
     Read actual Modbus registers from the multi-port plant simulator.
 
     Each device runs on its OWN TCP port with device_id=1:
-      PMS  → port (base)     HR0=demand, IR0-3=total/soc/soh/cap
-      PCS1 → port (base+1)   HR0=setpoint, IR0=active_power
-      PCS2 → port (base+2)   HR0=setpoint, IR0=active_power
-      BMS1 → port (base+4)   IR0=soc, IR1=soh, IR2=capacity
-      BMS2 → port (base+5)   IR0=soc, IR1=soh, IR2=capacity
+      PMS  → port (base)     HR 40420-40421=demand(U32/10), HR 40424=direction, HR 40525-40526=active_power(I32/1000), HR 50000=alarm
+      PCS1 → port (base+1)   IR 32080-32081=active_power (I32 gain=1000)
+      PCS2 → port (base+2)   IR 32080-32081=active_power (I32 gain=1000)
+      BMS1 → port (base+4)   IR 30105-30106=SOC+SOH, IR 30058-30059=capacity(U32/10), IR 39014=alarm
+      BMS2 → port (base+5)   same as BMS1
       Multimeter → via RTU bridge HTTP (optional)
 
     The `port` argument is the PMS base port (default 15020).
@@ -268,20 +268,33 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None,
         finally:
             client.close()
 
-    # --- PMS (base port) ---
+    # --- PMS (base port) — Huawei HR addresses ---
     def _read_pms(c):
-        hr = c.read_holding_registers(0, count=1, device_id=1)
-        ir = c.read_input_registers(0, count=5, device_id=1)
-        if hr.isError() or ir.isError():
+        # Control: HR 40420-40424 (5 regs) → demand magnitude(U32/10) + direction
+        hr_ctl = c.read_holding_registers(40420, count=5, device_id=1)
+        # Telemetry: HR 40525-40526 (2 regs) → active_power I32/1000
+        hr_tel = c.read_holding_registers(40525, count=2, device_id=1)
+        # Alarm: HR 50000 (1 reg)
+        hr_alm = c.read_holding_registers(50000, count=1, device_id=1)
+        if hr_ctl.isError() or hr_tel.isError():
             return None
+        # Decode demand: U32 gain=10 (magnitude) + direction
+        demand_raw = (hr_ctl.registers[0] << 16) | hr_ctl.registers[1]
+        demand_mag_kw = demand_raw / 10.0
+        direction = hr_ctl.registers[4]  # 0=discharge, 1=charge
+        demand_kw = -demand_mag_kw if direction == 1 else demand_mag_kw
+        # Decode active_power: I32 gain=1000
+        ap_raw = (hr_tel.registers[0] << 16) | hr_tel.registers[1]
+        if ap_raw >= 0x80000000:
+            ap_raw -= 0x100000000
+        active_power_kw = ap_raw / 1000.0
+        # Alarm
+        alarm = hr_alm.registers[0] if not hr_alm.isError() else 0
         return {
             "device_id": "PMS", "timestamp": now,
-            "demand_control_power": round(_s16(hr.registers[0]) * SCALE, 1),
-            "total_active_power": round(_s16(ir.registers[0]) * SCALE, 1),
-            "soc_avg": ir.registers[1],
-            "soh_avg": ir.registers[2],
-            "capacity_total": round(ir.registers[3] * SCALE, 1),
-            "alarm": ir.registers[4],
+            "demand_control_power": round(demand_kw, 1),
+            "total_active_power": round(active_power_kw, 3),
+            "alarm": alarm,
         }
     res = _read_device(port, _read_pms)
     if res:
@@ -289,32 +302,48 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None,
         res["occurs_alarms"] = decode_pms_alarm(alarm_val)
         devices.append(res)
 
-    # --- PCS1 (base+1), PCS2 (base+2) ---
+    # --- PCS1 (base+1), PCS2 (base+2) — Huawei IR 32080 ---
     for offset, name in [(1, "PCS1"), (2, "PCS2")]:
         def _read_pcs(c, _name=name):
-            ir = c.read_input_registers(0, count=1, device_id=1)
+            ir = c.read_input_registers(32080, count=2, device_id=1)
             if ir.isError():
                 return None
+            raw = (ir.registers[0] << 16) | ir.registers[1]
+            if raw >= 0x80000000:
+                raw -= 0x100000000
+            active_kw = raw / 1000.0
             return {
                 "device_id": _name, "timestamp": now,
-                "active_power": round(_s16(ir.registers[0]) * SCALE, 1),
+                "active_power": round(active_kw, 3),
             }
         res = _read_device(port + offset, _read_pcs)
         if res:
             devices.append(res)
 
-    # --- BMS1 (base+4), BMS2 (base+5) ---
+    # --- BMS1 (base+4), BMS2 (base+5) — Huawei IR addresses ---
     for offset, name in [(4, "BMS1"), (5, "BMS2")]:
         def _read_bms(c, _name=name):
-            ir = c.read_input_registers(0, count=4, device_id=1)
-            if ir.isError():
+            # BCU-1 SOC + SOH (30105-30106, 2 contiguous U16)
+            rr_soc = c.read_input_registers(30105, count=2, device_id=1)
+            if rr_soc.isError():
                 return None
+            soc = rr_soc.registers[0]   # U16 gain=1
+            soh = rr_soc.registers[1]   # U16 gain=1
+            # Rated capacity (30058-30059, U32 gain=10)
+            rr_cap = c.read_input_registers(30058, count=2, device_id=1)
+            capacity_kwh = 0.0
+            if not rr_cap.isError():
+                cap_raw = (rr_cap.registers[0] << 16) | rr_cap.registers[1]
+                capacity_kwh = cap_raw / 10.0
+            # Alarm (39014)
+            rr_alm = c.read_input_registers(39014, count=1, device_id=1)
+            alarm = rr_alm.registers[0] if not rr_alm.isError() else 0
             return {
                 "device_id": _name, "timestamp": now,
-                "soc": ir.registers[0],
-                "soh": ir.registers[1],
-                "capacity": round(ir.registers[2] * SCALE, 1),
-                "alarm": ir.registers[3],
+                "soc": soc,
+                "soh": soh,
+                "capacity": round(capacity_kwh, 1),
+                "alarm": alarm,
             }
         res = _read_device(port + offset, _read_bms)
         if res:
@@ -410,11 +439,12 @@ def data_upload_loop(tm: TokenManager, api_url: str, collector_fn,
 # ---------------------------------------------------------------------------
 def _apply_command_to_modbus(modbus_host: str, modbus_port: int, cmd: dict) -> bool:
     """
-    Write demand_control_power to PMS HR0 based on command type.
+    Write demand to PMS via Huawei HR 40420-40421 (U32 gain=10, magnitude)
+    + HR 40424 (direction: 0=discharge, 1=charge).
 
-    charge    → negative kW (battery absorbs)
-    discharge → positive kW (battery exports)
-    standby   → 0 kW
+    charge    → direction=1, magnitude=|kW|
+    discharge → direction=0, magnitude=|kW|
+    standby   → direction=0, magnitude=0
     """
     try:
         from pymodbus.client import ModbusTcpClient
@@ -426,29 +456,37 @@ def _apply_command_to_modbus(modbus_host: str, modbus_port: int, cmd: dict) -> b
     power_kw = abs(cmd.get("power_kw") or 0)
 
     if command == "charge":
-        demand_kw = -power_kw      # negative = charging
+        direction = 1
+        magnitude = power_kw
     elif command == "discharge":
-        demand_kw = power_kw       # positive = discharging
+        direction = 0
+        magnitude = power_kw
     else:  # standby
-        demand_kw = 0.0
+        direction = 0
+        magnitude = 0.0
 
-    # Encode to int16 (scale 0.1 kW per LSB) → uint16 two's complement
-    raw = int(round(demand_kw / 0.1))
-    if raw < 0:
-        raw = raw + 0x10000        # two's complement for negative
-    raw = raw & 0xFFFF
+    # Encode magnitude as U32 gain=10
+    raw = int(round(magnitude * 10))
+    raw = max(0, raw) & 0xFFFFFFFF
+    hi = (raw >> 16) & 0xFFFF
+    lo = raw & 0xFFFF
 
     try:
         client = ModbusTcpClient(modbus_host, port=modbus_port, timeout=2)
         if not client.connect():
             log.error("Cannot connect to PMS %s:%d to write command", modbus_host, modbus_port)
             return False
-        wr = client.write_register(0, raw, device_id=1)  # HR0 = demand_control_power
+        # Write HR 40420-40421 (magnitude U32)
+        wr1 = client.write_registers(40420, [hi, lo], device_id=1)
+        # Write HR 40424 (direction)
+        wr2 = client.write_register(40424, direction, device_id=1)
         client.close()
-        if wr.isError():
-            log.error("PMS HR0 write failed: %s", wr)
+        if wr1.isError() or wr2.isError():
+            log.error("PMS demand write failed: wr1=%s wr2=%s", wr1, wr2)
             return False
-        log.info("    Wrote PMS HR0 = %.1f kW (raw=0x%04X) [%s]", demand_kw, raw, command)
+        demand_kw = -magnitude if direction == 1 else magnitude
+        log.info("    Wrote PMS HR40420=%.1f kW dir=%d (raw=0x%08X) [%s]",
+                 demand_kw, direction, raw, command)
         return True
     except Exception as e:
         log.error("Modbus write error: %s", e)
@@ -528,30 +566,33 @@ def command_poll_loop(tm: TokenManager, api_url: str,
 
 
 # ---------------------------------------------------------------------------
-# Helpers: write kW to PMS HR0
+# Helpers: write kW to PMS HR 40420 (Huawei)
 # ---------------------------------------------------------------------------
 def _write_pms_hr0(modbus_host: str, modbus_port: int, demand_kw: float) -> bool:
-    """Encode *demand_kw* to int16 (scale 0.1) and write PMS HR0."""
+    """Encode *demand_kw* to U32 (gain=10) magnitude + direction and write PMS HR 40420-40421 + HR 40424."""
     try:
         from pymodbus.client import ModbusTcpClient
     except ImportError:
         log.warning("pymodbus not installed — cannot write to simulator")
         return False
 
-    raw = int(round(demand_kw / 0.1))
-    if raw < 0:
-        raw = raw + 0x10000
-    raw = raw & 0xFFFF
+    magnitude = abs(demand_kw)
+    direction = 1 if demand_kw < 0 else 0  # 0=discharge, 1=charge
+    raw = int(round(magnitude * 10))
+    raw = max(0, raw) & 0xFFFFFFFF
+    hi = (raw >> 16) & 0xFFFF
+    lo = raw & 0xFFFF
 
     try:
         client = ModbusTcpClient(modbus_host, port=modbus_port, timeout=2)
         if not client.connect():
             log.error("Cannot connect to PMS %s:%d", modbus_host, modbus_port)
             return False
-        wr = client.write_register(0, raw, device_id=1)
+        wr1 = client.write_registers(40420, [hi, lo], device_id=1)
+        wr2 = client.write_register(40424, direction, device_id=1)
         client.close()
-        if wr.isError():
-            log.error("PMS HR0 write failed: %s", wr)
+        if wr1.isError() or wr2.isError():
+            log.error("PMS demand write failed: wr1=%s wr2=%s", wr1, wr2)
             return False
         return True
     except Exception as e:
@@ -735,7 +776,7 @@ def schedule_execution_loop(
                 raw_target = recent_schedule["control_power_kw"] or 0.0
                 target_kw = max(-MAX_POWER_KW, min(MAX_POWER_KW, raw_target))
 
-            # ── 4b. Alarm check — read alarm registers (Day 8) ─────
+            # ── 4b. Alarm check — read alarm registers (Huawei addresses) ─
             try:
                 from pymodbus.client import ModbusTcpClient as _McpCli
                 for _dev, _off, _decode in [
@@ -743,10 +784,15 @@ def schedule_execution_loop(
                     ("BMS2", 5, decode_bms_alarm),
                     ("PMS",  0, decode_pms_alarm),
                 ]:
-                    _alarm_addr = 3 if _dev.startswith("BMS") else 4
+                    if _dev.startswith("BMS"):
+                        _alarm_addr = 39014   # BMS IR 39014 (tele_alarm_1)
+                        _read_fn = "read_input_registers"
+                    else:
+                        _alarm_addr = 50000   # PMS HR 50000 (alarm_info_1)
+                        _read_fn = "read_holding_registers"
                     _c = _McpCli(modbus_host, port=modbus_port + _off, timeout=2)
                     if _c.connect():
-                        _rr = _c.read_input_registers(_alarm_addr, count=1, device_id=1)
+                        _rr = getattr(_c, _read_fn)(_alarm_addr, count=1, device_id=1)
                         _c.close()
                         if not _rr.isError():
                             _codes = _decode(_rr.registers[0])
@@ -984,7 +1030,7 @@ def frequency_control_loop(
                 time.sleep(interval)
                 continue
 
-            # Fresh alarm read (0.5s cadence, independent of schedule loop's 10s)
+            # Fresh alarm read (0.5s cadence, Huawei addresses)
             try:
                 from pymodbus.client import ModbusTcpClient as _FcCli
                 for _dev, _port_off, _decode_fn in [
@@ -992,10 +1038,15 @@ def frequency_control_loop(
                     ("BMS2", 5, decode_bms_alarm),
                     ("PMS",  0, decode_pms_alarm),
                 ]:
-                    _alarm_addr = 3 if _dev.startswith("BMS") else 4
+                    if _dev.startswith("BMS"):
+                        _alarm_addr = 39014   # BMS IR 39014
+                        _read_fn = "read_input_registers"
+                    else:
+                        _alarm_addr = 50000   # PMS HR 50000
+                        _read_fn = "read_holding_registers"
                     _fc = _FcCli(modbus_host, port=modbus_port + _port_off, timeout=1)
                     if _fc.connect():
-                        _rr = _fc.read_input_registers(_alarm_addr, count=1, device_id=1)
+                        _rr = getattr(_fc, _read_fn)(_alarm_addr, count=1, device_id=1)
                         _fc.close()
                         if not _rr.isError():
                             alarm_tracker.update(_dev, _decode_fn(_rr.registers[0]))
