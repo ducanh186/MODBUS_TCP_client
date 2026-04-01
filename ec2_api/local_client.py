@@ -231,7 +231,7 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None,
     """
     Read actual Modbus registers from the multi-port plant simulator.
 
-    Each device runs on its OWN TCP port with device_id=1:
+    Each device runs on its OWN TCP port with device_id=0:
       PMS  → port (base)     HR 40420-40421=demand(U32/10), HR 40424=direction, HR 40525-40526=active_power(I32/1000), HR 50000=alarm
       PCS1 → port (base+1)   IR 32080-32081=active_power (I32 gain=1000)
       PCS2 → port (base+2)   IR 32080-32081=active_power (I32 gain=1000)
@@ -271,11 +271,11 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None,
     # --- PMS (base port) — Huawei HR addresses ---
     def _read_pms(c):
         # Control: HR 40420-40424 (5 regs) → demand magnitude(U32/10) + direction
-        hr_ctl = c.read_holding_registers(40420, count=5, device_id=1)
+        hr_ctl = c.read_holding_registers(40420, count=5, device_id=0)
         # Telemetry: HR 40525-40526 (2 regs) → active_power I32/1000
-        hr_tel = c.read_holding_registers(40525, count=2, device_id=1)
+        hr_tel = c.read_holding_registers(40525, count=2, device_id=0)
         # Alarm: HR 50000 (1 reg)
-        hr_alm = c.read_holding_registers(50000, count=1, device_id=1)
+        hr_alm = c.read_holding_registers(50000, count=1, device_id=0)
         if hr_ctl.isError() or hr_tel.isError():
             return None
         # Decode demand: U32 gain=10 (magnitude) + direction
@@ -305,7 +305,7 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None,
     # --- PCS1 (base+1), PCS2 (base+2) — Huawei IR 32080 ---
     for offset, name in [(1, "PCS1"), (2, "PCS2")]:
         def _read_pcs(c, _name=name):
-            ir = c.read_input_registers(32080, count=2, device_id=1)
+            ir = c.read_input_registers(32080, count=2, device_id=0)
             if ir.isError():
                 return None
             raw = (ir.registers[0] << 16) | ir.registers[1]
@@ -324,19 +324,19 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None,
     for offset, name in [(4, "BMS1"), (5, "BMS2")]:
         def _read_bms(c, _name=name):
             # BCU-1 SOC + SOH (30105-30106, 2 contiguous U16)
-            rr_soc = c.read_input_registers(30105, count=2, device_id=1)
+            rr_soc = c.read_input_registers(30105, count=2, device_id=0)
             if rr_soc.isError():
                 return None
             soc = rr_soc.registers[0]   # U16 gain=1
             soh = rr_soc.registers[1]   # U16 gain=1
             # Rated capacity (30058-30059, U32 gain=10)
-            rr_cap = c.read_input_registers(30058, count=2, device_id=1)
+            rr_cap = c.read_input_registers(30058, count=2, device_id=0)
             capacity_kwh = 0.0
             if not rr_cap.isError():
                 cap_raw = (rr_cap.registers[0] << 16) | rr_cap.registers[1]
                 capacity_kwh = cap_raw / 10.0
             # Alarm (39014)
-            rr_alm = c.read_input_registers(39014, count=1, device_id=1)
+            rr_alm = c.read_input_registers(39014, count=1, device_id=0)
             alarm = rr_alm.registers[0] if not rr_alm.isError() else 0
             return {
                 "device_id": _name, "timestamp": now,
@@ -384,7 +384,7 @@ def collect_device_data_modbus(host: str, port: int, rtu_bridge_url: str = None,
 
     # --- Transducer (base+6) ---
     def _read_transducer(c):
-        ir = c.read_input_registers(0, count=1, device_id=1)
+        ir = c.read_input_registers(0, count=1, device_id=0)
         if ir.isError():
             return None
         freq_raw = ir.registers[0]
@@ -477,9 +477,9 @@ def _apply_command_to_modbus(modbus_host: str, modbus_port: int, cmd: dict) -> b
             log.error("Cannot connect to PMS %s:%d to write command", modbus_host, modbus_port)
             return False
         # Write HR 40420-40421 (magnitude U32)
-        wr1 = client.write_registers(40420, [hi, lo], device_id=1)
+        wr1 = client.write_registers(40420, [hi, lo], device_id=0)
         # Write HR 40424 (direction)
-        wr2 = client.write_register(40424, direction, device_id=1)
+        wr2 = client.write_register(40424, direction, device_id=0)
         client.close()
         if wr1.isError() or wr2.isError():
             log.error("PMS demand write failed: wr1=%s wr2=%s", wr1, wr2)
@@ -588,8 +588,8 @@ def _write_pms_hr0(modbus_host: str, modbus_port: int, demand_kw: float) -> bool
         if not client.connect():
             log.error("Cannot connect to PMS %s:%d", modbus_host, modbus_port)
             return False
-        wr1 = client.write_registers(40420, [hi, lo], device_id=1)
-        wr2 = client.write_register(40424, direction, device_id=1)
+        wr1 = client.write_registers(40420, [hi, lo], device_id=0)
+        wr2 = client.write_register(40424, direction, device_id=0)
         client.close()
         if wr1.isError() or wr2.isError():
             log.error("PMS demand write failed: wr1=%s wr2=%s", wr1, wr2)
@@ -792,7 +792,7 @@ def schedule_execution_loop(
                         _read_fn = "read_holding_registers"
                     _c = _McpCli(modbus_host, port=modbus_port + _off, timeout=2)
                     if _c.connect():
-                        _rr = getattr(_c, _read_fn)(_alarm_addr, count=1, device_id=1)
+                        _rr = getattr(_c, _read_fn)(_alarm_addr, count=1, device_id=0)
                         _c.close()
                         if not _rr.isError():
                             _codes = _decode(_rr.registers[0])
@@ -897,7 +897,7 @@ def transducer_poll_loop(
         try:
             client = ModbusTcpClient(modbus_host, port=transducer_port, timeout=2)
             if client.connect():
-                rr = client.read_input_registers(0, count=1, device_id=1)
+                rr = client.read_input_registers(0, count=1, device_id=0)
                 client.close()
                 if not rr.isError():
                     freq_hz = round(rr.registers[0] * 0.001, 3)
@@ -1046,7 +1046,7 @@ def frequency_control_loop(
                         _read_fn = "read_holding_registers"
                     _fc = _FcCli(modbus_host, port=modbus_port + _port_off, timeout=1)
                     if _fc.connect():
-                        _rr = getattr(_fc, _read_fn)(_alarm_addr, count=1, device_id=1)
+                        _rr = getattr(_fc, _read_fn)(_alarm_addr, count=1, device_id=0)
                         _fc.close()
                         if not _rr.isError():
                             alarm_tracker.update(_dev, _decode_fn(_rr.registers[0]))
